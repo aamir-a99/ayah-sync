@@ -33,6 +33,13 @@ export default defineManifest({
       js: ['src/content/content.js'],
       run_at: 'document_idle',
     },
+    {
+      // Opens the "keep on top" window; that API only exists in the page's world.
+      matches: ['<all_urls>'],
+      js: ['src/content/pip-bridge.js'],
+      run_at: 'document_idle',
+      world: 'MAIN',
+    },
   ],
   web_accessible_resources: [
     {

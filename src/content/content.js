@@ -36,9 +36,16 @@ let tl = null; // { ayahs:[{ref,t0,t1,w:[...],arabic,...}], duration, key, ... }
 let tlRaf = null;
 let tlIdx = -2;
 let lastHref = location.href;
-let pipWin = null; // always-on-top window holding the card, when popped out
-const raf = (fn) => (pipWin || window).requestAnimationFrame(fn);
-const caf = (id) => { try { (pipWin || window).cancelAnimationFrame(id); cancelAnimationFrame(id); } catch {} };
+let inPip = false; // the card is in the always-on-top window
+// The tab's own animation frames stop when it is in the background, which is
+// exactly when the floating window is used — so drive updates with a timer
+// there (tabs playing audio are not throttled).
+const raf = (fn) => (inPip ? -setTimeout(fn, 50) : requestAnimationFrame(fn));
+const caf = (id) => {
+  if (id == null) return;
+  if (id < 0) clearTimeout(-id);
+  else cancelAnimationFrame(id);
+};
 
 // --- Live mode ----------------------------------------------------------------
 let liveMatch = null;
@@ -102,6 +109,51 @@ function rerender() {
   shown = null;
   builtText = '';
   renderAyah(a, a.__next || null);
+}
+
+// ===================================================================== fonts
+// Chrome ignores @font-face rules written inside a shadow root, so the card's
+// fonts are registered on the document itself with the FontFace API. The bytes
+// are fetched once and reused for the floating window's document.
+const FONT_FILES = [
+  ['QLT-Uthmani', 'uthmani.woff2', {}],
+  ['QLT-IndoPak', 'indopak.woff2', {}],
+  ['QLT-Text', 'figtree.woff2', { weight: '400 700' }],
+];
+let fontBytes = null; // Promise<[name, ArrayBuffer, descriptors][]>
+
+function fetchFonts() {
+  if (fontBytes) return fontBytes;
+  fontBytes = Promise.all(
+    FONT_FILES.map(async ([name, file, desc]) => {
+      let buf;
+      try {
+        buf = await (await fetch(chrome.runtime.getURL(`fonts/${file}`))).arrayBuffer();
+      } catch {
+        // The page's own security policy blocked the request: get the bytes
+        // through the service worker instead.
+        const r = await chrome.runtime.sendMessage({ type: 'FONT_GET', file });
+        const bin = atob(r?.b64 || '');
+        buf = Uint8Array.from(bin, (c) => c.charCodeAt(0)).buffer;
+      }
+      return [name, buf, desc];
+    }),
+  );
+  fontBytes.then((list) => window.postMessage({ qltFonts: list.map(([n, b, d]) => [n, b.slice(0), d]) }, location.origin)).catch(() => {});
+  return fontBytes;
+}
+
+async function installFonts(win) {
+  try {
+    for (const [name, buf, desc] of await fetchFonts()) {
+      if (!buf.byteLength) continue;
+      const face = new win.FontFace(name, buf.slice(0), desc);
+      await face.load();
+      win.document.fonts.add(face);
+    }
+  } catch (e) {
+    console.warn('[qlt] fonts not installed', e);
+  }
 }
 
 // ====================================================================== card
@@ -271,7 +323,6 @@ function ensureCard() {
     }
     hideCard();
   });
-  els.pop.classList.toggle('hidden', !('documentPictureInPicture' in window));
   els.pop.addEventListener('click', togglePip);
   els.play.addEventListener('click', toggleMedia);
   els.prev.addEventListener('click', () => seekAyah(-1));
@@ -334,6 +385,7 @@ function ensureCard() {
   });
 
   applyPrefs();
+  installFonts(window);
   registerAmbientProps(window);
   paintAmbient(true);
   chrome.storage?.local.get('cardPos', (v) => {
@@ -371,49 +423,64 @@ function setPlayIcon(playing) {
 
 // Pop the card into an always-on-top window so it stays visible over other
 // tabs and other applications; closing that window puts it back on the page.
-async function togglePip() {
-  if (pipWin) return pipWin.close();
-  try {
+function togglePip() {
+  if (!host) return;
+  if (!inPip) {
     const r = host.getBoundingClientRect();
-    const w = await window.documentPictureInPicture.requestWindow({
-      width: Math.round(Math.max(320, r.width)), height: Math.round(Math.max(220, r.height + 8)),
-    });
-    const home = host;
-    pipWin = w;
-    w.document.body.style.cssText = 'margin:0;background:#1b1a17;';
-    registerAmbientProps(w);
-    home.dataset.pos = home.style.cssText;
-    home.style.cssText = 'all:initial; display:block;' + ['--ar-size', '--card-w', '--ar-font', '--qlt-g1', '--qlt-g2'].map((k) => `${k}:${home.style.getPropertyValue(k)};`).join('');
-    w.document.body.append(home);
-    els.card.classList.add('pip');
-    // Keys work in the floating window: space pauses, arrows step through ayahs.
-    w.document.addEventListener('keydown', (e) => {
-      if (e.code === 'Space') toggleMedia();
-      else if (e.code === 'ArrowLeft') seekAyah(-1);
-      else if (e.code === 'ArrowRight') seekAyah(1);
-      else return;
-      e.preventDefault();
-    });
-    w.addEventListener('pagehide', () => {
-      pipWin = null;
-      if (host === home) {
-        home.style.cssText = home.dataset.pos;
-        els.card.classList.remove('pip');
-        document.documentElement.appendChild(home);
-        applyPrefs();
-        if (tl) tlRaf = raf(tlTick);
-        if (liveMatch) liveRaf = raf(liveTick);
-      }
-    });
-    if (tl) tlRaf = raf(tlTick);
-    if (liveMatch) liveRaf = raf(liveTick);
-  } catch (e) {
-    console.warn('[qlt] could not pop out', e);
+    host.dataset.pipW = Math.round(Math.max(320, r.width));
+    host.dataset.pipH = Math.round(Math.max(220, r.height + 8));
+    delete host.dataset.pipGone;
   }
+  // Handled synchronously by pip-bridge.js in the page's script world, so this
+  // click still counts as the gesture Chrome requires.
+  document.dispatchEvent(new Event('qlt-pip-toggle'));
+}
+
+document.addEventListener('qlt-pip-opened', () => {
+  if (!host) return;
+  inPip = true;
+  host.dataset.pos = host.style.cssText;
+  host.style.cssText =
+    'all:initial; display:block;' +
+    ['--ar-size', '--card-w', '--ar-font', '--qlt-g1', '--qlt-g2']
+      .map((k) => `${k}:${host.style.getPropertyValue(k)};`)
+      .join('');
+  els.card.classList.add('pip');
+  restartLoops();
+});
+document.addEventListener('qlt-pip-closed', () => {
+  inPip = false;
+  if (!host || host.dataset.pipGone) return;
+  host.style.cssText = host.dataset.pos || '';
+  els.card.classList.remove('pip');
+  applyPrefs();
+  restartLoops();
+});
+document.addEventListener('qlt-pip-error', () => {
+  if (els) els.pop.title = 'Floating window is not available in this browser';
+});
+// Keys pressed in the floating window: space pauses, arrows step through ayahs.
+document.addEventListener('qlt-pip-key', () => {
+  const key = host?.dataset.pipKey;
+  if (key === 'space') toggleMedia();
+  else if (key === 'prev') seekAyah(-1);
+  else if (key === 'next') seekAyah(1);
+});
+
+function restartLoops() {
+  caf(tlRaf);
+  caf(liveRaf);
+  tlRaf = liveRaf = null;
+  if (tl) tlRaf = raf(tlTick);
+  if (liveMatch) liveRaf = raf(liveTick);
 }
 
 function hideCard() {
-  if (pipWin) { const w = pipWin; pipWin = null; try { w.close(); } catch {} }
+  if (inPip && host) {
+    host.dataset.pipGone = '1';
+    inPip = false;
+    document.dispatchEvent(new Event('qlt-pip-toggle')); // closes the window
+  }
   caf(liveRaf);
   liveRaf = null;
   liveMatch = null;

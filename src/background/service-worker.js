@@ -416,6 +416,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       })();
       return true;
 
+    case 'FONT_GET':
+      (async () => {
+        try {
+          const buf = await (await fetch(chrome.runtime.getURL(`fonts/${msg.file}`))).arrayBuffer();
+          let bin = '';
+          const bytes = new Uint8Array(buf);
+          for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+          sendResponse({ b64: btoa(bin) });
+        } catch {
+          sendResponse({});
+        }
+      })();
+      return true;
+
     case 'PING_HELPER':
       pingHelper().then(sendResponse);
       return true;

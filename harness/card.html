@@ -29,9 +29,12 @@
         window.__qlt.timeline = tl;
         document.getElementById('info').textContent =
           `${tl.ayahs.length} ayahs · ${Math.round(v.duration)}s · ` + (tl.passages || []).map((p) => `${p.from}→${p.to}`).join(', ');
-        const s = document.createElement('script');
-        s.src = '__CONTENT_SCRIPT__';
-        document.body.appendChild(s);
+        for (const src of ['__BRIDGE_SCRIPT__', '__CONTENT_SCRIPT__']) {
+          const s = document.createElement('script');
+          s.src = src;
+          s.async = false;
+          document.body.appendChild(s);
+        }
         if (q.get('t')) v.currentTime = Number(q.get('t'));
       })();
 

@@ -61,7 +61,8 @@ createServer((req, res) => {
   } else if (path === '/card') {
     const manifest = JSON.parse(readFileSync(join(root, 'dist/manifest.json'), 'utf8'));
     const html = readFileSync(join(root, 'harness/card.html'), 'utf8')
-      .replace('__CONTENT_SCRIPT__', '/' + manifest.content_scripts[0].js[0]);
+      .replace('__CONTENT_SCRIPT__', '/' + manifest.content_scripts[0].js[0])
+      .replace('__BRIDGE_SCRIPT__', '/' + manifest.content_scripts[1].js[0]);
     res.writeHead(200, { 'Content-Type': TYPES['.html'] }).end(html);
   } else if (path.startsWith('/harness/')) {
     sendFile(req, res, safe(join(root, 'harness'), path.slice(9)));
