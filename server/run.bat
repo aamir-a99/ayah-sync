@@ -1,5 +1,5 @@
 @echo off
-REM Start the Quran Live helper (Windows). First run sets everything up.
+REM Start the Ayah Sync helper (Windows). First run sets everything up.
 cd /d "%~dp0"
 
 where python >nul 2>nul

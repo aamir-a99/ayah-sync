@@ -273,7 +273,7 @@ function ensureCard() {
         <div id="spans"></div><div class="fill" id="fill"></div><div class="head" id="head"></div>
       </div>
       <div class="bar" id="bar">
-        <div class="where" id="where">Quran Live</div>
+        <div class="where" id="where">Ayah Sync</div>
         <div class="ctl">
           <span id="seek" class="hidden" style="display:flex;align-items:center">
             <button id="prev" title="Previous ayah" aria-label="Previous ayah"><svg viewBox="0 0 16 16"><path d="M10 3 5 8l5 5"/></svg></button>
@@ -499,7 +499,7 @@ function setStatus(text, tone) {
   els.verse.classList.add('hidden');
   els.status.classList.remove('hidden');
   els.status.textContent = text;
-  els.where.innerHTML = `<span class="live ${tone || 'wait'}"></span>Quran Live`;
+  els.where.innerHTML = `<span class="live ${tone || 'wait'}"></span>Ayah Sync`;
   shown = null;
   builtText = '';
 }

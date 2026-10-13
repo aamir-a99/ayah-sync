@@ -3,10 +3,10 @@ import pkg from './package.json' with { type: 'json' };
 
 export default defineManifest({
   manifest_version: 3,
-  name: 'Quran Live',
+  name: 'Ayah Sync',
   version: pkg.version,
   description:
-    'Follows Quran recitation videos word by word and shows the translation. Needs the Quran Live helper running on your computer.',
+    'Follows Quran recitation videos word by word and shows the translation. Needs the Ayah Sync helper running on your computer.',
   icons: {
     16: 'icons/icon16.png',
     48: 'icons/icon48.png',
@@ -14,7 +14,7 @@ export default defineManifest({
   },
   action: {
     default_popup: 'src/popup/popup.html',
-    default_title: 'Quran Live',
+    default_title: 'Ayah Sync',
   },
   background: {
     service_worker: 'src/background/service-worker.js',

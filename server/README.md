@@ -1,4 +1,4 @@
-# Quran Live — helper
+# Ayah Sync — helper
 
 The extension can show a card and read a video's clock; the listening happens
 here. This is a small WebSocket server (`ws://127.0.0.1:8790`) with two jobs:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the Quran Live helper (macOS/Linux). First run sets everything up.
+# Start the Ayah Sync helper (macOS/Linux). First run sets everything up.
 set -e
 cd "$(dirname "$0")"
 command -v ffmpeg >/dev/null || { echo "FFmpeg was not found. Install it (brew install ffmpeg / apt install ffmpeg) and run this again."; exit 1; }

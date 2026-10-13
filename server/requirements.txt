@@ -1,4 +1,4 @@
-# Quran Live — helper
+# Ayah Sync — helper
 # run.bat / run.sh install these for you (and pick the GPU build of torch when
 # an NVIDIA card is present). To install by hand on an NVIDIA machine:
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124

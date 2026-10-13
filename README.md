@@ -1,4 +1,4 @@
-# Quran Live
+# Ayah Sync
 
 Follow any Quran recitation video word by word, with the translation underneath.
 
@@ -33,7 +33,7 @@ hand and run a small helper program on your own computer. See
 
 ## Install (once)
 
-1. **Download.** Get `quran-live.zip` from the
+1. **Download.** Get `ayah-sync.zip` from the
    [Releases](../../releases) page and unzip it, for example to `C:\QuranLive`.
 2. **Start the helper.** Open the `server` folder and double-click `run.bat`.
    The first run installs what it needs and downloads the speech models, which
@@ -44,13 +44,13 @@ hand and run a small helper program on your own computer. See
    - Turn on **Developer mode** (top right)
    - Click **Load unpacked** and choose the `extension` folder
 4. **Pin it.** Click the puzzle-piece icon in Chrome's toolbar and pin
-   **Quran Live**.
+   **Ayah Sync**.
 
 ## Use
 
 1. Double-click `server\run.bat` and leave its window open.
 2. Open a recitation video on YouTube.
-3. Click the Quran Live icon, then **Sync verses to this video**.
+3. Click the Ayah Sync icon, then **Sync verses to this video**.
 4. The first sync of a video takes roughly a minute. After that the card follows
    the recitation, and that video opens instantly next time.
 
@@ -104,6 +104,9 @@ Checked against quran.com's published word timings on three recitations,
 ## Known limits
 
 - Needs the local helper and, realistically, an NVIDIA graphics card.
+- **Keep on top + Adblock Plus:** on YouTube, Adblock Plus closes the floating
+  window the moment it opens. Pause Adblock Plus on YouTube (or turn it off) to
+  use keep on top. The card inside the page is not affected.
 - When a reciter repeats part of an ayah, the highlight drifts for a few seconds.
   On a recitation with heavy repetition only 42% of words landed within 0.2 s.
 - IndoPak pause marks are not shown.

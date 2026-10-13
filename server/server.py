@@ -1,5 +1,5 @@
 """
-Quran Live Translate — local helper.
+Ayah Sync — local helper.
 
 Two jobs, one WebSocket (ws://127.0.0.1:8790):
 
