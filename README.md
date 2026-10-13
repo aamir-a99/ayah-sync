@@ -135,6 +135,11 @@ ordinary browser tab for testing.
   project's licence.
 - Fonts: Amiri Quran, Noto Naskh Arabic and Figtree (SIL Open Font License).
 
+## Support
+
+Ayah Sync is free and always will be. If it helps you, you can support the work at
+[ko-fi.com/alivzxc](https://ko-fi.com/alivzxc).
+
 ## Licence
 
 The code is released under the [MIT licence](LICENSE).
