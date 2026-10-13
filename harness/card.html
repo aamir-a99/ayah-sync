@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Card harness</title>
+    <style>
+      body { margin: 0; background: #0f0f0f; color: #ddd; font: 14px system-ui; }
+      .stage { width: 860px; margin: 24px 0 0 24px; }
+      video { width: 100%; height: 300px; background: #000 linear-gradient(160deg, #26323a, #0d1114); display: block; }
+      p { color: #888; }
+    </style>
+    <script src="/harness/shim.js"></script>
+  </head>
+  <body>
+    <div class="stage">
+      <video id="v" controls preload="auto"></video>
+      <p id="info">Loading…</p>
+    </div>
+    <script>
+      // Load the media and its timeline, then start the real built content
+      // script exactly as Chrome would inject it.
+      (async () => {
+        const q = new URLSearchParams(location.search);
+        const v = document.getElementById('v');
+        v.src = '/cache/' + q.get('media');
+        await new Promise((r) => v.addEventListener('loadedmetadata', r, { once: true }));
+        const tl = await (await fetch('/cache/' + q.get('tl'))).json();
+        tl.duration ||= v.duration;
+        window.__qlt.timeline = tl;
+        document.getElementById('info').textContent =
+          `${tl.ayahs.length} ayahs · ${Math.round(v.duration)}s · ` + (tl.passages || []).map((p) => `${p.from}→${p.to}`).join(', ');
+        const s = document.createElement('script');
+        s.src = '__CONTENT_SCRIPT__';
+        document.body.appendChild(s);
+        if (q.get('t')) v.currentTime = Number(q.get('t'));
+      })();
+
+      // What the card is highlighting right now (read by the automated check).
+      window.__probe = () => {
+        const root = document.getElementById('__qlt_card_host__')?.shadowRoot;
+        if (!root) return null;
+        const words = [...root.querySelectorAll('#arabic .w')];
+        return {
+          t: document.getElementById('v').currentTime,
+          where: root.getElementById('where').textContent.trim(),
+          cur: words.findIndex((w) => w.classList.contains('cur')),
+          done: words.filter((w) => w.classList.contains('done')).length,
+          words: words.length,
+          curText: words.find((w) => w.classList.contains('cur'))?.textContent || null,
+          trans: root.getElementById('trans').textContent,
+        };
+      };
+    </script>
+  </body>
+</html>

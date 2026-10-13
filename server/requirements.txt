@@ -1,0 +1,10 @@
+# Quran Live — helper
+# run.bat / run.sh install these for you (and pick the GPU build of torch when
+# an NVIDIA card is present). To install by hand on an NVIDIA machine:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt
+transformers>=4.40
+torch>=2.2
+websockets>=12
+numpy>=1.24
+yt-dlp

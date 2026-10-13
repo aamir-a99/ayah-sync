@@ -1,0 +1,18 @@
+{
+  "name": "quran-live",
+  "version": "0.1.0",
+  "description": "Follows Quran recitation videos word by word and shows the translation. Needs the Quran Live helper running on your computer.",
+  "type": "module",
+  "scripts": {
+    "fetch-data": "node scripts/fetch-quran-data.mjs",
+    "fetch-fonts": "node scripts/fetch-fonts.mjs",
+    "fetch-translations": "node scripts/fetch-translations.mjs",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.28",
+    "vite": "^5.4.10"
+  }
+}

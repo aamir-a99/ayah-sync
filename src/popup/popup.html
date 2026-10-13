@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="./popup.css" />
+    <title>Quran Live</title>
+  </head>
+  <body>
+    <header>
+      <span class="mark">Quran Live</span>
+      <span class="helper" id="helper" title=""><i id="helperDot"></i><span id="helperText">Checking…</span></span>
+    </header>
+
+    <main>
+      <!-- One of these stages is shown at a time. -->
+      <section class="stage" id="stageIdle" hidden>
+        <p class="eyebrow">This tab</p>
+        <h1 id="tabTitle">—</h1>
+        <button class="primary" id="syncBtn">Sync verses to this video</button>
+        <p class="note">
+          One pass over the audio, then every word follows the video — pause, rewind and replay freely.
+        </p>
+        <button class="link" id="liveBtn">It’s a live stream — listen instead</button>
+      </section>
+
+      <section class="stage" id="stageWorking" hidden>
+        <p class="eyebrow">Syncing</p>
+        <h1 id="workTitle">—</h1>
+        <div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="meter"><i id="meterFill"></i></div>
+        <p class="note" id="workStage">Waiting for the helper…</p>
+      </section>
+
+      <section class="stage" id="stageReady" hidden>
+        <p class="eyebrow">Following this video</p>
+        <ul class="passages" id="passages"></ul>
+        <p class="note" id="readyNote"></p>
+        <div class="row">
+          <button class="quiet" id="resyncBtn">Sync again</button>
+          <button class="quiet" id="clearBtn">Stop following</button>
+        </div>
+      </section>
+
+      <section class="stage" id="stageLive" hidden>
+        <p class="eyebrow">Listening live</p>
+        <h1 id="liveRef">Waiting for recitation…</h1>
+        <button class="primary stop" id="stopBtn">Stop listening</button>
+        <p class="note">Live mode estimates the word between updates. For a normal video, syncing is exact.</p>
+      </section>
+
+      <section class="stage" id="stageHelper" hidden>
+        <p class="eyebrow">Helper not running</p>
+        <h1>Start the helper on this computer</h1>
+        <p class="note">
+          Quran Live does its listening in a small helper app. Open <b>run.bat</b> in the
+          <b>server</b> folder and leave its window open, then check again.
+        </p>
+        <button class="primary" id="retryBtn">Check again</button>
+      </section>
+
+      <p class="problem" id="problem" hidden></p>
+    </main>
+
+    <section class="reading" aria-label="Reading settings">
+      <div class="preview" id="preview" dir="rtl" lang="ar"></div>
+      <div class="set">
+        <span>Script</span>
+        <div class="seg" id="scriptSeg" role="group" aria-label="Script">
+          <button data-v="uthmani">Uthmani</button>
+          <button data-v="indopak">IndoPak</button>
+        </div>
+      </div>
+      <div class="set">
+        <span>Arabic size</span>
+        <div class="stepper">
+          <button id="sizeDown" aria-label="Smaller text">−</button>
+          <output id="sizeVal">24</output>
+          <button id="sizeUp" aria-label="Larger text">+</button>
+        </div>
+      </div>
+      <label class="set">
+        <span>Translation</span>
+        <input type="checkbox" class="switch" id="showTrans" checked />
+      </label>
+      <label class="set">
+        <span>Translation language</span>
+        <select id="lang" class="pick">
+          <option value="en">English</option>
+          <option value="ur">اردو — Urdu</option>
+          <option value="id">Bahasa Indonesia</option>
+          <option value="bn">বাংলা — Bengali</option>
+          <option value="tr">Türkçe — Turkish</option>
+          <option value="fr">Français — French</option>
+        </select>
+      </label>
+      <label class="set">
+        <span>Match the video’s colours</span>
+        <input type="checkbox" class="switch" id="ambient" checked />
+      </label>
+    </section>
+
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>
