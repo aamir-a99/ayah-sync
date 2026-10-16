@@ -34,7 +34,7 @@ hand and run a small helper program on your own computer. See
 ## Install (once)
 
 1. **Download.** Get `ayah-sync.zip` from the
-   [Releases](../../releases) page and unzip it, for example to `C:\QuranLive`.
+   [Releases](../../releases) page and unzip it, for example to `C:\AyahSync`.
 2. **Start the helper.** Open the `server` folder and double-click `run.bat`.
    The first run installs what it needs and downloads the speech models, which
    can take a while. It is ready when the window says
@@ -45,6 +45,16 @@ hand and run a small helper program on your own computer. See
    - Click **Load unpacked** and choose the `extension` folder
 4. **Pin it.** Click the puzzle-piece icon in Chrome's toolbar and pin
    **Ayah Sync**.
+
+### On a Mac (untested)
+
+Nobody has tried this on a Mac yet, and it will be slow: the helper can only use
+NVIDIA graphics cards, so on a Mac it runs on the processor. Reports welcome.
+
+1. Install [Homebrew](https://brew.sh), then in Terminal: `brew install python ffmpeg`
+2. Unzip `ayah-sync.zip`, open Terminal in the `server` folder and run
+   `bash run.sh`. Wait for `Listening on ws://127.0.0.1:8790`.
+3. Add the extension to Chrome exactly as in step 3 above.
 
 ## Use
 

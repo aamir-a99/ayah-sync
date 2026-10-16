@@ -10,7 +10,7 @@ here. This is a small WebSocket server (`ws://127.0.0.1:8790`) with two jobs:
 
 ## Run
 
-Windows: double-click `run.bat`. macOS / Linux: `./run.sh`.
+Windows: double-click `run.bat`. macOS / Linux: `bash run.sh` (untested).
 
 The first run creates a Python environment in `.venv`, installs the
 requirements (the GPU build of torch when an NVIDIA card is found) and
