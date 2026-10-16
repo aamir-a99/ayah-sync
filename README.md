@@ -58,7 +58,7 @@ NVIDIA graphics cards, so on a Mac it runs on the processor. Reports welcome.
 
 ## Use
 
-1. Double-click `server\run.bat` and leave its window open.
+1. Double-click `server\run.bat` (Mac: `bash run.sh`) and leave its window open.
 2. Open a recitation video on YouTube.
 3. Click the Ayah Sync icon, then **Sync verses to this video**.
 4. The first sync of a video takes roughly a minute. After that the card follows
