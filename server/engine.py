@@ -14,7 +14,7 @@ from quran_matcher import QuranMatcher
 
 # A large general model on GPU copes with noisy, reverberant recordings; the
 # matcher absorbs its small wording errors. Override with QLT_MODEL.
-MODEL_ID = os.environ.get("QLT_MODEL", "openai/whisper-large-v3")
+MODEL_ID = os.environ.get("QLT_MODEL", "openai/whisper-large-v3-turbo")
 # General Whisper models need Arabic forced; Quran fine-tunes must NOT be given
 # language/task (their config is single-language-flagged and would raise).
 MULTILINGUAL = MODEL_ID.startswith("openai/")

@@ -37,10 +37,12 @@ matcher = QuranMatcher(Path(__file__).resolve().parent.parent / "src" / "data")
 
 import torch
 from transformers import pipeline
-MODEL = os.environ.get("QLT_MODEL", "openai/whisper-large-v3")
+MODEL = os.environ.get("QLT_MODEL", "openai/whisper-large-v3-turbo")
 gpu = torch.cuda.is_available()
+_t_load = time.time()
 asr = pipeline("automatic-speech-recognition", model=MODEL, device=0 if gpu else -1,
                torch_dtype=torch.float16 if gpu else torch.float32)
+print(f"model {MODEL} loaded in {time.time() - _t_load:.1f}s")
 
 audio = align.load_audio(mp3)
 t = time.time()
@@ -83,4 +85,4 @@ for thr in (0.2, 0.35, 0.5, 1.0):
 exp_refs = [v["verse_key"] for v in meta["timestamps"]]
 got_refs = [e["ref"] for e in tl["ayahs"]]
 print("ayah sequence exact:", got_refs == exp_refs, "| extra:", [r for r in got_refs if r not in exp_refs][:8])
-json.dump(tl, open(align.CACHE_DIR / f"gt_{recitation}_{chapter}.timeline.json", "w", encoding="utf-8"), ensure_ascii=False)
+json.dump(tl, open(align.CACHE_DIR / f"gt_{recitation}_{chapter}.{MODEL.split('/')[-1]}.timeline.json", "w", encoding="utf-8"), ensure_ascii=False)

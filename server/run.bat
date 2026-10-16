@@ -33,7 +33,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo.
 echo Starting the helper. Leave this window open while you use the extension.
-echo The first start downloads the speech models (about 4.5 GB).
+echo The first start downloads the speech models (about 3 GB).
 echo.
 .venv\Scripts\python server.py
 pause

@@ -1,6 +1,6 @@
 {
   "name": "ayah-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Follows Quran recitation videos word by word and shows the translation. Needs the Ayah Sync helper running on your computer.",
   "type": "module",
   "scripts": {

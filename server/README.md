@@ -18,7 +18,7 @@ downloads the models:
 
 | Model | Used for | Size |
 |---|---|---|
-| `openai/whisper-large-v3` | transcription | ~3 GB |
+| `openai/whisper-large-v3-turbo` | transcription | ~1.6 GB |
 | `jonatasgrosman/wav2vec2-large-xlsr-53-arabic` | word timing | ~1.2 GB |
 
 It is ready when it prints `Listening on ws://127.0.0.1:8790`.

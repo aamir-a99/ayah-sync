@@ -29,7 +29,7 @@ hand and run a small helper program on your own computer. See
 - [Python 3.10+](https://www.python.org/downloads/) — tick **Add python.exe to
   PATH** in the installer
 - FFmpeg — in a terminal: `winget install Gyan.FFmpeg`
-- About 8 GB of free disk space for the speech models
+- About 6 GB of free disk space for the speech models
 
 ## Install (once)
 
@@ -99,7 +99,7 @@ rather than timing it exactly.
 ## How it works
 
 1. The helper downloads the video's audio and transcribes it with
-   [Whisper large-v3](https://huggingface.co/openai/whisper-large-v3).
+   [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo).
 2. The rough transcript is matched against the full text of the Quran to find
    which passages were recited.
 3. A [forced-alignment model](https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-arabic)
