@@ -8,12 +8,18 @@
     "fetch-fonts": "node scripts/fetch-fonts.mjs",
     "fetch-translations": "node scripts/fetch-translations.mjs",
     "dev": "vite",
-    "build": "vite build",
+    "prepare-browser-runtime": "node scripts/prepare-browser-runtime.mjs",
+    "test:local": "node scripts/test-local-matcher.mjs",
+    "test:capture": "node scripts/test-local-capture.mjs",
+    "build": "npm run prepare-browser-runtime && vite build",
     "preview": "vite preview"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.28",
     "puppeteer-core": "^25.13.0",
     "vite": "^5.4.10"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.1"
   }
 }

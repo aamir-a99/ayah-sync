@@ -27,6 +27,8 @@ const state = {
   mediaPlaying: true, // captured tab's play/pause state
   debug: null, // last human-readable working state (diagnostics)
   error: null,
+  backend: 'helper',
+  captureEpoch: 0,
   // Whole-video sync: idle | working | ready | error
   sync: { status: 'idle', tabId: null, key: null, stage: null, pct: 0, summary: null, error: null },
 };
@@ -42,7 +44,11 @@ const HELPER_DOWN = 'The helper is not running. Open run.bat in the server folde
 const restored = chrome.storage.session
   .get('qltState')
   .then((r) => {
-    if (r?.qltState) Object.assign(state, r.qltState);
+    if (r?.qltState) {
+      for (const key of Object.keys(state)) {
+        if (Object.hasOwn(r.qltState, key)) state[key] = r.qltState[key];
+      }
+    }
     // A sync that was mid-flight when the worker was recycled lost its socket.
     if (state.sync?.status === 'working') {
       state.sync = { ...state.sync, status: 'error', error: 'The sync was interrupted. Try again.' };
@@ -129,6 +135,21 @@ async function tellCard(tabId, message) {
       }
     } catch {}
   }
+}
+
+async function captureClock() {
+  const tabId = await resolveTabId();
+  if (!state.capturing || tabId == null) return null;
+  const epoch = state.captureEpoch;
+  let timer;
+  try {
+    // A busy or frozen tab must not leave the caller waiting forever.
+    const clock = await Promise.race([
+      chrome.tabs.sendMessage(tabId, { type: 'CAPTURE_CLOCK' }),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), 1500); }),
+    ]);
+    return clock ? { ...clock, captureEpoch: epoch } : null;
+  } catch { return null; } finally { clearTimeout(timer); }
 }
 
 // --- Whole-video sync ---------------------------------------------------------
@@ -301,6 +322,7 @@ async function teardown() {
     }
   }
   state.capturing = false;
+  state.captureEpoch++;
   state.tabId = null;
   state.displayTabId = null;
   state.status = 'idle';
@@ -339,13 +361,18 @@ async function startCapture() {
   state.error = null;
   state.lastMatch = null;
 
+  const { qltRecognition = 'helper' } = await chrome.storage.local.get('qltRecognition');
+  state.backend = qltRecognition;
+  state.captureEpoch++;
+
   await chrome.runtime.sendMessage({
     target: 'offscreen',
     type: 'START_CAPTURE',
     streamId,
+    backend: qltRecognition,
   });
 
-  await tellCard(tab.id, { type: 'CARD_SHOW', status: 'loading-model' });
+  await tellCard(tab.id, { type: 'CARD_SHOW', status: state.status });
   await tellCard(tab.id, { type: 'CARD_WATCH_MEDIA' }); // watch this tab's play/pause
   broadcastState();
   updateBadge();
@@ -395,6 +422,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target === 'offscreen') return;
 
   switch (msg?.type) {
+    case 'CAPTURE_CLOCK':
+      captureClock().then(sendResponse);
+      return true;
+    case 'CAPTURE_RESET':
+      (async () => {
+        const capId = await resolveTabId();
+        if (state.capturing && sender?.tab?.id === capId) {
+          state.lastMatch = null;
+          state.captureEpoch++;
+          state.debug = 'Seeking — confirming the new passage…';
+          broadcastState();
+          chrome.runtime.sendMessage({ target: 'offscreen', type: 'RESET_CAPTURE' }).catch(() => {});
+        }
+      })();
+      return true;
     case 'TR_GET':
       // Translations in other languages ship inside the extension (public/tr).
       (async () => {
@@ -451,7 +493,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const k = `qltTL_${id}`;
         const r = id != null ? await chrome.storage.session.get(k).catch(() => ({})) : {};
         const saved = r[k];
-        sendResponse(saved && saved.key === videoKey(msg.url || '') ? { timeline: saved.timeline } : {});
+        if (saved && saved.key === videoKey(msg.url || '')) {
+          sendResponse({ timeline: saved.timeline });
+        } else {
+          sendResponse({});
+        }
       })();
       return true;
 
@@ -462,8 +508,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const capId = await resolveTabId();
         if (sender?.tab?.id != null && sender.tab.id === capId) {
           state.mediaPlaying = msg.playing !== false;
+          chrome.runtime.sendMessage({ target: 'offscreen', type: 'MEDIA_PLAYING', playing: state.mediaPlaying }).catch(() => {});
           const disp = await resolveDisplayTabId();
           if (disp != null) tellCard(disp, { type: 'CARD_MEDIA', playing: state.mediaPlaying });
+          broadcastState();
         }
       })();
       return true;
@@ -485,7 +533,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case 'START':
-      startCapture();
+      startCapture().catch((error) => {
+        setError(error.message || String(error));
+        closeOffscreen();
+      });
       sendResponse?.({ ok: true });
       return true;
 
@@ -519,6 +570,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       (async () => {
         const tabId = await resolveDisplayTabId();
         if (msg.match) {
+          if (msg.clock && msg.clock.captureEpoch !== state.captureEpoch) return;
+          if (msg.clock && (!state.capturing || msg.clock.captureEpoch !== state.captureEpoch)) return;
           state.lastMatch = msg.match;
           if (tabId != null) tellCard(tabId, { type: 'CARD_UPDATE', match: msg.match });
         } else if (tabId != null) {
@@ -539,6 +592,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const tabId = await resolveDisplayTabId();
         if (tabId != null)
           tellCard(tabId, { type: 'CARD_STATUS', status: 'error', error: msg.error });
+        await closeOffscreen(); // Do not report a stopped recognizer as an orphaned active capture.
       })();
       return true;
   }

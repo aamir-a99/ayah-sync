@@ -135,8 +135,58 @@ Load `dist/` as an unpacked extension. The helper lives in `server/`; see
 [server/README.md](server/README.md). `harness/` runs the built extension in an
 ordinary browser tab for testing.
 
+### Browser CPU option (experimental)
+
+Select **Recognition → Browser CPU**, then **Listen live on CPU**. The bundled
+quantized `tarteel-ai/whisper-tiny-ar-quran` model recognises the playing tab
+locally through WASM. No Python helper, media download, audio upload, batch
+scan, stored timeline or seek markers are used. The helper remains the default
+mode and retains its full-video alignment and navigation.
+
+CPU mode shows only confirmed live ayahs and translations. Initial identification
+needs at least six seconds of speech and passage confirmation. It keeps a rolling
+audio window, runs one inference at a time and leaves 2–5 seconds of idle time
+after each call (longer on slower CPUs). Old work never builds up in a queue.
+Silence and paused playback do not repeatedly run recognition.
+Detected speech pauses trigger a recognition attempt on the preceding speech,
+with trailing silence trimmed and a short reverb tail retained. A pause alone
+never advances the ayah; a text match is still required. Once a passage is
+confirmed, fresh speech after a breath is checked using roughly 2.5–6 seconds
+from the new phrase, rather than including the old ayah. Recently checked
+phrases are not immediately recognised again at the next pause. Continuous
+speech is checked every eight seconds (four near an ayah end), with the CPU
+cooldown still enforced. Shorter inputs reduce repeated transcription, but do
+not guarantee faster WASM inference because Whisper pads its encoder input.
+Seeking clears
+the old passage; the new position must be recognised again. Ayah changes may
+lag or be missed, particularly on slow or busy devices; average-CPU performance
+is not guaranteed. The recogniser uses a single WASM thread.
+
+Word highlighting is optional and off by default. If enabled it is a live
+estimate, not forced-aligned word timing. CPU mode has no sync/loading timeline
+or previous/next/repeat navigation. The card follows the active tab just as in
+the existing live mode.
+
+To include the CPU model in a build, export it once before `npm run build`:
+
+```bash
+python -m pip install 'optimum-onnx[onnxruntime]' 'transformers<5'
+python scripts/export-browser-model.py
+```
+
+The export downloads the model weights; runtime inference uses bundled files
+and does not upload audio. Generated model files are not committed.
+Run `npm run test:local` for unit tests. After exporting and building,
+`BROWSER_PATH=/path/to/chrome npm run test:capture` tests tab capture, recognition
+pause/seek recovery and absence of helper requests or CPU timelines; it downloads
+a short test recording if needed.
+On Linux, `bash scripts/run-browser-local.sh` opens an isolated Brave/Chrome
+profile with the extension loaded, GPU disabled and no CPU throttling.
+
 ## Credits
 
+- Browser speech model: [Tarteel Whisper Tiny Arabic Quran](https://huggingface.co/tarteel-ai/whisper-tiny-ar-quran)
+  (Apache-2.0), exported to quantized ONNX and run with Transformers.js.
 - Quran text and translations: [Al-Quran Cloud](https://alquran.cloud) and
   [quran.com](https://quran.com). Translators: Saheeh International (English),
   Fateh Muhammad Jalandhry (Urdu), Indonesian Ministry of Religious Affairs,

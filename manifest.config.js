@@ -21,11 +21,10 @@ export default defineManifest({
     type: 'module',
   },
   permissions: ['tabCapture', 'activeTab', 'offscreen', 'storage', 'scripting'],
-  // The offscreen document streams captured audio to the local recognition
-  // server over a WebSocket; allow only that connection.
+  // Browser recognition is bundled; downloads use the loopback Python helper.
   content_security_policy: {
     extension_pages:
-      "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:8790 ws://localhost:8790",
+      "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; connect-src 'self' ws://127.0.0.1:8790 ws://localhost:8790",
   },
   content_scripts: [
     {

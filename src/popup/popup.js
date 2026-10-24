@@ -30,6 +30,7 @@ let helper = null; // null = unknown, else {ok, model, device}
 let state = null;
 let curScript = 'uthmani';
 let curSize = 24;
+let recognition = 'helper';
 
 // ------------------------------------------------------------------- fonts
 (function fonts() {
@@ -63,9 +64,13 @@ function show(which) {
 function render() {
   // Helper status (top right)
   const h = $('helper');
-  h.className = `helper ${helper == null ? '' : helper.ok ? 'on' : 'off'}`;
-  $('helperText').textContent = helper == null ? 'Checking…' : helper.ok ? 'Helper on' : 'Helper off';
-  h.title = helper?.ok ? `${helper.model || ''} · ${helper.device === 'cuda' ? 'GPU' : 'CPU'}` : '';
+  const local = recognition === 'browser';
+  $('cpuHighlightSetting').hidden = !local;
+  h.className = `helper ${local ? 'on' : helper == null ? '' : helper.ok ? 'on' : 'off'}`;
+  $('helperText').textContent = local ? 'Local CPU' : helper == null ? 'Checking…' : helper.ok ? 'GPU' : 'CPU';
+  h.title = local ? 'Quran-tiny · CPU' : helper?.ok
+    ? [helper.model, helper.device === 'cuda' ? 'GPU' : helper.device === 'cpu' ? 'CPU' : ''].filter(Boolean).join(' · ')
+    : '';
 
   if (!state) return;
   const sync = state.sync || { status: 'idle' };
@@ -74,19 +79,28 @@ function render() {
   const problem = $('problem');
   problem.hidden = true;
 
-  if (state.capturing) {
+  if (state.capturing && !(mine && ['working', 'ready'].includes(sync.status))) {
     show('live');
+    $('liveHeading').textContent = 'Listening live';
     const m = state.lastMatch;
     $('liveRef').textContent = m
       ? `${m.surahMeta?.englishName || `Surah ${m.surah}`} ${m.surah}:${m.ayah}`
-      : 'Waiting for recitation…';
+      : state.status === 'loading-model' ? 'Loading recognition model…' : 'Waiting for recitation…';
+    $('liveNote').textContent = local
+      ? ''
+      : 'Live recognition is approximate. Sync the video for precise word timing.';
+    $('liveNote').title = '';
+    if (mine && sync.status === 'error') {
+      problem.hidden = false;
+      problem.textContent = sync.error;
+    }
     if (state.error) {
       problem.hidden = false;
       problem.textContent = state.error;
     }
     return;
   }
-  if (helper && !helper.ok && !(mine && sync.status === 'ready')) {
+  if (!local && helper && !helper.ok && !(mine && sync.status === 'ready')) {
     show('helper');
     return;
   }
@@ -126,7 +140,11 @@ function render() {
   $('tabTitle').textContent = title;
   const usable = !!tab && /^https?:/.test(tab.url || '');
   $('syncBtn').disabled = !usable;
-  $('liveBtn').hidden = !usable;
+  $('syncBtn').textContent = local ? 'Listen live on CPU' : 'Sync verses to this video';
+  $('modeNote').textContent = local
+    ? ''
+    : 'One pass over the audio, then every word follows the video — pause, rewind and replay freely.';
+  $('liveBtn').hidden = !usable || local;
   const err = (mine && sync.status === 'error' && sync.error) || state.error || (!usable && 'Open a page with a video to begin.');
   if (err) {
     problem.hidden = false;
@@ -165,6 +183,8 @@ async function refresh() {
 }
 
 async function checkHelper() {
+  const { qltRecognition = 'helper' } = await chrome.storage.local.get('qltRecognition');
+  if (qltRecognition === 'browser') return;
   try {
     helper = (await chrome.runtime.sendMessage({ type: 'PING_HELPER' })) || { ok: false };
   } catch {
@@ -182,8 +202,8 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // ----------------------------------------------------------------- actions
 const send = (type, extra) => chrome.runtime.sendMessage({ type, ...extra }).then(() => setTimeout(refresh, 120));
-$('syncBtn').addEventListener('click', () => send('SYNC_START'));
-$('resyncBtn').addEventListener('click', () => send('SYNC_START', { force: true }));
+$('syncBtn').addEventListener('click', () => send(recognition === 'browser' ? 'START' : 'SYNC_START'));
+$('resyncBtn').addEventListener('click', () => send(recognition === 'browser' ? 'START' : 'SYNC_START', { force: true }));
 $('clearBtn').addEventListener('click', () => send('SYNC_CLEAR'));
 $('liveBtn').addEventListener('click', () => send('START'));
 $('stopBtn').addEventListener('click', () => send('STOP'));
@@ -194,15 +214,26 @@ $('retryBtn').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------- settings
-chrome.storage.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltAmbient', 'qltLang'], (v) => {
+chrome.storage.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltAmbient', 'qltLang', 'qltRecognition', 'qltCPUHighlight'], (v) => {
+  $('cpuHighlight').checked = v?.qltCPUHighlight === true;
+  recognition = v?.qltRecognition || 'helper';
+  $('recognition').value = recognition;
   $('ambient').checked = v?.qltAmbient !== false;
   $('lang').value = v?.qltLang || 'en';
   $('showTrans').checked = v?.showTranslation !== false;
   curScript = v?.qltScript || 'uthmani';
   curSize = v?.qltFontSize || 24;
   paintReading();
+  render();
+});
+$('recognition').addEventListener('change', async (e) => {
+  recognition = e.target.value;
+  await chrome.storage.local.set({ qltRecognition: recognition });
+  if (state?.capturing) await send('STOP');
+  render();
 });
 $('showTrans').addEventListener('change', (e) => chrome.storage.local.set({ showTranslation: e.target.checked }));
+$('cpuHighlight').addEventListener('change', (e) => chrome.storage.local.set({ qltCPUHighlight: e.target.checked }));
 $('lang').addEventListener('change', (e) => chrome.storage.local.set({ qltLang: e.target.value }));
 $('ambient').addEventListener('change', (e) => chrome.storage.local.set({ qltAmbient: e.target.checked }));
 $('scriptSeg').addEventListener('click', (e) => {

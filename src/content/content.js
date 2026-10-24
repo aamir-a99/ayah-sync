@@ -57,11 +57,15 @@ let prevWord = 0;
 let prevTime = 0;
 let liveRaf = null;
 let mediaPlaying = true;
+let browserCPU = false;
+let cpuHighlight = false;
 const MAX_DRIFT_MS = 7000;
 const MAX_LEAD = 4;
 
 // =============================================================== preferences
-chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCardWidth', 'qltAmbient', 'qltLang'], (v) => {
+chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCardWidth', 'qltAmbient', 'qltLang', 'qltRecognition', 'qltCPUHighlight'], (v) => {
+  browserCPU = v?.qltRecognition === 'browser';
+  cpuHighlight = v?.qltCPUHighlight === true;
   if (v?.qltLang) lang = v.qltLang;
   ambient = v?.qltAmbient !== false;
   showTranslation = v?.showTranslation !== false;
@@ -73,6 +77,12 @@ chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCa
 });
 chrome.storage?.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
+  if (changes.qltRecognition || changes.qltCPUHighlight) {
+    if (changes.qltRecognition) browserCPU = changes.qltRecognition.newValue === 'browser';
+    if (changes.qltCPUHighlight) cpuHighlight = changes.qltCPUHighlight.newValue === true;
+    if (liveMatch) showLive(liveMatch);
+    else if (browserCPU && !tl) paintWords(Infinity);
+  }
   if (changes.showTranslation) showTranslation = changes.showTranslation.newValue !== false;
   if (changes.qltScript) script = changes.qltScript.newValue || 'uthmani';
   if (changes.qltFontSize) fontSize = changes.qltFontSize.newValue || 24;
@@ -212,6 +222,8 @@ function ensureCard() {
       .ribbon .tick { position: absolute; top: 4px; width: 1px; height: 6px; background: var(--ink-3); }
       .ribbon .fill { position: absolute; top: 6px; left: 0; height: 2px; background: var(--green); border-radius: 1px; }
       .ribbon .head { position: absolute; top: 3px; width: 2px; height: 8px; margin-left: -1px; background: var(--green); border-radius: 1px; }
+      .ribbon-label { position: absolute; inset: 0; text-align: center; font-size: 10px; line-height: 14px; color: var(--ink-2); pointer-events: none; }
+      .sync-note { padding: 5px 14px 0; font-size: 11px; color: var(--ink-2); }
 
       .bar { display: flex; align-items: center; gap: 6px; padding: 9px 8px 0 14px; cursor: grab; user-select: none; }
       .bar:active { cursor: grabbing; }
@@ -332,7 +344,8 @@ function ensureCard() {
     const v = findVideo();
     if (!tl || !v) return;
     const r = els.ribbon.getBoundingClientRect();
-    const t = ((e.clientX - r.left) / r.width) * tl.duration;
+    const duration = tl.duration;
+    const t = Math.max(0, Math.min(duration, ((e.clientX - r.left) / r.width) * duration));
     // Snap to the start of the ayah under the pointer.
     const i = ayahIndexAt(t);
     v.currentTime = Math.max(0, (i >= 0 ? tl.ayahs[i].t0 : t) - 0.05);
@@ -663,10 +676,12 @@ function renderAyah(a, next) {
   const nextText = next ? arabicOf(next) : '';
   els.nextWrap.classList.toggle('hidden', !nextText);
   if (nextText) els.nextArabic.textContent = nextText;
+  if (browserCPU && !cpuHighlight && !tl) paintWords(Infinity);
 }
 
 /** cur = index of the word being recited (-1: none yet, Infinity: all done). */
 function paintWords(cur) {
+  if (browserCPU && !cpuHighlight && !tl) cur = Infinity;
   for (let i = 0; i < wordEls.length; i++) {
     const el = wordEls[i];
     const state = i < cur ? 1 : i === cur ? 2 : 0;
@@ -705,8 +720,7 @@ function findVideo() {
   return best;
 }
 
-function ayahIndexAt(t) {
-  const a = tl.ayahs;
+function ayahIndexAt(t, a = tl?.ayahs || []) {
   let lo = 0;
   let hi = a.length - 1;
   let ans = -1;
@@ -737,6 +751,12 @@ function loadTimeline(timeline) {
   loadTranslations(tl.ayahs.map((a) => a.ref));
   els.seek.classList.remove('hidden');
   els.ribbon.classList.remove('hidden');
+  delete els.ribbon.dataset.mode;
+  els.ribbon.title = 'Jump to an ayah';
+  for (const button of [els.prev, els.again, els.next]) button.disabled = false;
+  els.prev.title = 'Previous ayah';
+  els.again.title = 'Repeat this ayah';
+  els.next.title = 'Next ayah';
   // Ribbon: a line per recited passage, a notch at each ayah start.
   const pct = (t) => `${Math.min(100, (t / tl.duration) * 100).toFixed(3)}%`;
   els.spans.textContent = '';
@@ -830,13 +850,14 @@ function tlTick() {
 
 function seekAyah(dir) {
   const v = findVideo();
-  if (!tl || !v) return;
+  const entries = tl?.ayahs;
+  if (!entries?.length || !v) return;
   const t = v.currentTime + LEAD_S;
   let i = ayahIndexAt(t);
   if (dir === 0) i = Math.max(0, i);
-  else if (dir < 0) i = i <= 0 ? 0 : t - tl.ayahs[i].t0 > 2 ? i : i - 1;
-  else i = Math.min(tl.ayahs.length - 1, i + 1);
-  v.currentTime = Math.max(0, tl.ayahs[i].t0 - 0.05);
+  else if (dir < 0) i = i <= 0 ? 0 : t - entries[i].t0 > 2 ? i : i - 1;
+  else i = Math.min(entries.length - 1, i + 1);
+  v.currentTime = Math.max(0, entries[i].t0 - (tl ? 0.05 : 0));
   if (v.paused && dir === 0) v.play().catch(() => {});
 }
 
@@ -855,6 +876,12 @@ function showLive(m) {
   liveMatch = m;
   const ayahChanged = !shown || shown.ref !== m.ref;
   renderAyah(m, m.next || null);
+  if (browserCPU && !cpuHighlight) {
+    caf(liveRaf);
+    liveRaf = null;
+    paintWords(Infinity);
+    return;
+  }
   const now = performance.now();
   if (ayahChanged) {
     prevWord = m.word || 0;
@@ -870,7 +897,11 @@ function showLive(m) {
   }
   anchorWord = m.word || 0;
   anchorTime = now;
-  if (liveRaf == null) liveRaf = raf(liveTick);
+  if (liveRaf == null) {
+    shownWord = anchorWord;
+    paintWords(shownWord);
+    liveRaf = raf(liveTick);
+  }
 }
 
 function liveTick() {
@@ -906,6 +937,16 @@ function reportMedia() {
 function armMediaWatch() {
   if (mediaArmed) return reportMedia();
   mediaArmed = true;
+  document.addEventListener('seeking', (event) => {
+    if (!event.target?.matches?.('video, audio') || tl) return;
+    const following = !!liveMatch;
+    liveMatch = null;
+    shownWord = -1;
+    shown = null;
+    paintWords(-1);
+    if (following) setStatus('Identifying the new passage…', 'wait');
+    chrome.runtime.sendMessage({ type: 'CAPTURE_RESET' }).catch(() => {});
+  }, true);
   setInterval(reportMedia, 500);
   reportMedia();
 }
@@ -915,9 +956,17 @@ const LIVE_STATUS = {
   listening: 'Listening for recitation…',
   stopped: 'Stopped.',
 };
+const liveStatus = (status) => browserCPU && status === 'listening' ? 'Listening live'
+  : status === 'loading-model' && browserCPU ? 'Loading CPU model…' : LIVE_STATUS[status] || '';
 
 // ================================================================== messages
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'CAPTURE_CLOCK') {
+    const v = findVideo();
+    sendResponse(v ? { key: videoKey(location.href), href: location.href, time: v.currentTime, duration: v.duration,
+      playbackRate: v.playbackRate, seeking: v.seeking, paused: v.paused } : null);
+    return;
+  }
   if (msg?.type === 'TL_MEDIA') {
     const v = findVideo();
     sendResponse({ src: v ? v.currentSrc || v.src || '' : '', duration: v ? v.duration : 0 });
@@ -940,13 +989,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     case 'CARD_SHOW':
       if (tl) break;
       ensureCard();
-      setStatus(LIVE_STATUS[msg.status] || 'Starting…', 'wait');
+      setStatus(liveStatus(msg.status) || 'Starting…', 'wait');
       break;
     case 'CARD_STATUS':
       if (tl) break;
       ensureCard();
       if (msg.status === 'error') setStatus(msg.error || 'Something went wrong.', 'err');
-      else if (!shown) setStatus(LIVE_STATUS[msg.status] || '', 'wait');
+      else if (!shown) setStatus(liveStatus(msg.status), 'wait');
       break;
     case 'CARD_UPDATE':
       if (!tl && msg.match) showLive(msg.match);
