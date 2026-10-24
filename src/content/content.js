@@ -35,6 +35,8 @@ let wordEls = [];
 let tl = null; // { ayahs:[{ref,t0,t1,w:[...],arabic,...}], duration, key, ... }
 let tlRaf = null;
 let tlIdx = -2;
+let learned = null; // Partial CPU observations; NOT a forced-aligned timeline.
+let learnedTimer = null;
 let lastHref = location.href;
 let inPip = false; // the card is in the always-on-top window
 // The tab's own animation frames stop when it is in the background, which is
@@ -57,11 +59,16 @@ let prevWord = 0;
 let prevTime = 0;
 let liveRaf = null;
 let mediaPlaying = true;
+let browserCPU = false;
+let cpuHighlight = true;
+let cpuAudioReady = false;
 const MAX_DRIFT_MS = 7000;
 const MAX_LEAD = 4;
 
 // =============================================================== preferences
-chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCardWidth', 'qltAmbient', 'qltLang'], (v) => {
+chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCardWidth', 'qltAmbient', 'qltLang', 'qltRecognition', 'qltCPUHighlight'], (v) => {
+  browserCPU = v?.qltRecognition === 'browser';
+  cpuHighlight = v?.qltCPUHighlight !== false;
   if (v?.qltLang) lang = v.qltLang;
   ambient = v?.qltAmbient !== false;
   showTranslation = v?.showTranslation !== false;
@@ -73,6 +80,12 @@ chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCa
 });
 chrome.storage?.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
+  if (changes.qltRecognition || changes.qltCPUHighlight) {
+    if (changes.qltRecognition) browserCPU = changes.qltRecognition.newValue === 'browser';
+    if (changes.qltCPUHighlight) cpuHighlight = changes.qltCPUHighlight.newValue !== false;
+    if (liveMatch) showLive(liveMatch);
+    else if (browserCPU && !tl) paintWords(Infinity);
+  }
   if (changes.showTranslation) showTranslation = changes.showTranslation.newValue !== false;
   if (changes.qltScript) script = changes.qltScript.newValue || 'uthmani';
   if (changes.qltFontSize) fontSize = changes.qltFontSize.newValue || 24;
@@ -212,6 +225,9 @@ function ensureCard() {
       .ribbon .tick { position: absolute; top: 4px; width: 1px; height: 6px; background: var(--ink-3); }
       .ribbon .fill { position: absolute; top: 6px; left: 0; height: 2px; background: var(--green); border-radius: 1px; }
       .ribbon .head { position: absolute; top: 3px; width: 2px; height: 8px; margin-left: -1px; background: var(--green); border-radius: 1px; }
+      .ribbon[data-mode="learned"] .fill { display: none; }
+      .ribbon-label { position: absolute; inset: 0; text-align: center; font-size: 10px; line-height: 14px; color: var(--ink-2); pointer-events: none; }
+      .sync-note { padding: 5px 14px 0; font-size: 11px; color: var(--ink-2); }
 
       .bar { display: flex; align-items: center; gap: 6px; padding: 9px 8px 0 14px; cursor: grab; user-select: none; }
       .bar:active { cursor: grabbing; }
@@ -271,6 +287,7 @@ function ensureCard() {
     <div class="card" role="complementary" aria-label="Quran verse">
       <div class="ribbon hidden" id="ribbon" title="Jump to an ayah">
         <div id="spans"></div><div class="fill" id="fill"></div><div class="head" id="head"></div>
+        <span id="ribbonLabel" class="ribbon-label hidden">Timeline · learning…</span>
       </div>
       <div class="bar" id="bar">
         <div class="where" id="where">Ayah Sync</div>
@@ -289,6 +306,7 @@ function ensureCard() {
           <button id="close" title="Close" aria-label="Close"><svg viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
         </div>
       </div>
+      <div id="cpuSyncNote" class="sync-note hidden" role="status"></div>
       <div class="body">
         <div class="status" id="status">Starting…</div>
         <div id="verse" class="hidden">
@@ -330,9 +348,16 @@ function ensureCard() {
   els.next.addEventListener('click', () => seekAyah(1));
   els.ribbon.addEventListener('click', (e) => {
     const v = findVideo();
-    if (!tl || !v) return;
+    if ((!tl && !learned) || !v) return;
     const r = els.ribbon.getBoundingClientRect();
-    const t = ((e.clientX - r.left) / r.width) * tl.duration;
+    const duration = tl?.duration || learned.duration;
+    const t = Math.max(0, Math.min(duration, ((e.clientX - r.left) / r.width) * duration));
+    if (!tl) {
+      const entry = learned.entries.find((a) => Math.abs(a.t0 - t) / duration * r.width < 4 ||
+        (a.t0 <= t && t <= a.t1));
+      v.currentTime = entry ? entry.t0 : t; // Unheard areas remain freely seekable.
+      return;
+    }
     // Snap to the start of the ayah under the pointer.
     const i = ayahIndexAt(t);
     v.currentTime = Math.max(0, (i >= 0 ? tl.ayahs[i].t0 : t) - 0.05);
@@ -476,6 +501,9 @@ function restartLoops() {
 }
 
 function hideCard() {
+  cpuAudioReady = false;
+  clearInterval(learnedTimer);
+  learnedTimer = null;
   if (inPip && host) {
     host.dataset.pipGone = '1';
     inPip = false;
@@ -663,10 +691,12 @@ function renderAyah(a, next) {
   const nextText = next ? arabicOf(next) : '';
   els.nextWrap.classList.toggle('hidden', !nextText);
   if (nextText) els.nextArabic.textContent = nextText;
+  if (browserCPU && (!cpuHighlight || !cpuAudioReady) && !tl) paintWords(Infinity);
 }
 
 /** cur = index of the word being recited (-1: none yet, Infinity: all done). */
 function paintWords(cur) {
+  if (browserCPU && (!cpuHighlight || !cpuAudioReady) && !tl) cur = Infinity;
   for (let i = 0; i < wordEls.length; i++) {
     const el = wordEls[i];
     const state = i < cur ? 1 : i === cur ? 2 : 0;
@@ -705,8 +735,7 @@ function findVideo() {
   return best;
 }
 
-function ayahIndexAt(t) {
-  const a = tl.ayahs;
+function ayahIndexAt(t, a = tl?.ayahs || learned?.entries || []) {
   let lo = 0;
   let hi = a.length - 1;
   let ans = -1;
@@ -730,6 +759,9 @@ function loadTimeline(timeline) {
   caf(liveRaf);
   liveRaf = null;
   liveMatch = null;
+  learned = null;
+  clearInterval(learnedTimer);
+  learnedTimer = null;
   tl = timeline;
   tlIdx = -2;
   lastHref = location.href;
@@ -737,6 +769,14 @@ function loadTimeline(timeline) {
   loadTranslations(tl.ayahs.map((a) => a.ref));
   els.seek.classList.remove('hidden');
   els.ribbon.classList.remove('hidden');
+  delete els.ribbon.dataset.mode;
+  els.ribbon.title = 'Jump to an ayah';
+  shadow.querySelector('#cpuSyncNote').classList.add('hidden');
+  shadow.querySelector('#ribbonLabel').classList.add('hidden');
+  for (const button of [els.prev, els.again, els.next]) button.disabled = false;
+  els.prev.title = 'Previous ayah';
+  els.again.title = 'Repeat this ayah';
+  els.next.title = 'Next ayah';
   // Ribbon: a line per recited passage, a notch at each ayah start.
   const pct = (t) => `${Math.min(100, (t / tl.duration) * 100).toFixed(3)}%`;
   els.spans.textContent = '';
@@ -830,13 +870,14 @@ function tlTick() {
 
 function seekAyah(dir) {
   const v = findVideo();
-  if (!tl || !v) return;
+  const entries = tl?.ayahs || learned?.entries;
+  if (!entries?.length || !v) return;
   const t = v.currentTime + LEAD_S;
   let i = ayahIndexAt(t);
   if (dir === 0) i = Math.max(0, i);
-  else if (dir < 0) i = i <= 0 ? 0 : t - tl.ayahs[i].t0 > 2 ? i : i - 1;
-  else i = Math.min(tl.ayahs.length - 1, i + 1);
-  v.currentTime = Math.max(0, tl.ayahs[i].t0 - 0.05);
+  else if (dir < 0) i = i <= 0 ? 0 : t - entries[i].t0 > 2 ? i : i - 1;
+  else i = Math.min(entries.length - 1, i + 1);
+  v.currentTime = Math.max(0, entries[i].t0 - (tl ? 0.05 : 0));
   if (v.paused && dir === 0) v.play().catch(() => {});
 }
 
@@ -846,15 +887,92 @@ function helloTimeline() {
     .sendMessage({ type: 'TL_HELLO', url: location.href })
     .then((r) => {
       if (r?.timeline) loadTimeline(r.timeline);
+      else if (r?.learned) {
+        loadLearned(r.learned);
+        if (!r.learning && !shown) setStatus('Partial timeline restored. Start listening to learn more.', 'wait');
+      }
     })
     .catch(() => {});
 }
 
 // ================================================================= live mode
+function loadLearned(timeline, visible = true) {
+  if (tl || timeline?.key !== videoKey(location.href) || !Number.isFinite(timeline.duration)) return;
+  learned = timeline;
+  if (!visible) return;
+  ensureCard();
+  armMediaWatch();
+  els.ribbon.classList.remove('hidden');
+  els.ribbon.dataset.mode = 'learned';
+  els.ribbon.title = `Learning as you listen: ${learned.entries.length} approximate markers. Unmarked parts are not synced.`;
+  els.ribbon.setAttribute('aria-label', els.ribbon.title);
+  shadow.querySelector('#ribbonLabel').classList.toggle('hidden', !!learned.entries.length);
+  els.seek.classList.remove('hidden');
+  for (const button of [els.prev, els.again, els.next]) {
+    button.title = 'Jump to a learned ayah (approximate recognition point)';
+    button.disabled = !learned.entries.length;
+  }
+  els.spans.textContent = '';
+  for (const a of learned.entries) {
+    const span = document.createElement('div');
+    span.className = 'span';
+    span.style.left = `${a.t0 / learned.duration * 100}%`;
+    span.style.width = `${(a.t1 - a.t0) / learned.duration * 100}%`;
+    const tick = document.createElement('div');
+    tick.className = 'tick';
+    tick.style.left = span.style.left;
+    tick.title = `${a.ref} · ${clock(a.t0)} · approximate`;
+    els.spans.append(span, tick);
+  }
+  clearInterval(learnedTimer);
+  learnedTimer = setInterval(learnedTick, 250);
+  learnedTick();
+}
+
+function ensureCPUTimeline() {
+  if (!browserCPU || tl || !els) return;
+  const video = findVideo();
+  if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+  const key = videoKey(location.href);
+  if (!learned || learned.key !== key || Math.abs(learned.duration - video.duration) > 2) {
+    loadLearned({ key, duration: video.duration, entries: [], partial: true });
+  }
+}
+
+function learnedTick() {
+  if (!learned || !els || tl) return;
+  const v = findVideo();
+  if (learned.key !== videoKey(location.href) || (v && Math.abs(v.duration - learned.duration) > 2)) {
+    clearInterval(learnedTimer);
+    learnedTimer = null;
+    learned = null;
+    els.ribbon.classList.add('hidden');
+    els.seek.classList.add('hidden');
+    return;
+  }
+  if (!v) return;
+  els.fill.style.width = els.head.style.left = `${Math.min(100, v.currentTime / learned.duration * 100)}%`;
+  setPlayIcon(!v.paused);
+  if (!liveMatch) {
+    const a = learned.entries.findLast((e) => e.t0 <= v.currentTime && v.currentTime <= e.t1);
+    if (a) {
+      renderAyah(a, null);
+      paintWords(Infinity); // No fabricated word timestamps in learned mode.
+      els.where.title = 'Previously recognized here; timing is approximate.';
+    } else if (shown) setStatus('This part is not learned yet — listening…', 'wait');
+  }
+}
+
 function showLive(m) {
   liveMatch = m;
   const ayahChanged = !shown || shown.ref !== m.ref;
   renderAyah(m, m.next || null);
+  if (browserCPU && (!cpuHighlight || !cpuAudioReady)) {
+    caf(liveRaf);
+    liveRaf = null;
+    paintWords(Infinity);
+    return;
+  }
   const now = performance.now();
   if (ayahChanged) {
     prevWord = m.word || 0;
@@ -870,7 +988,11 @@ function showLive(m) {
   }
   anchorWord = m.word || 0;
   anchorTime = now;
-  if (liveRaf == null) liveRaf = raf(liveTick);
+  if (liveRaf == null) {
+    shownWord = anchorWord;
+    paintWords(shownWord);
+    liveRaf = raf(liveTick);
+  }
 }
 
 function liveTick() {
@@ -894,6 +1016,7 @@ function liveTick() {
 let mediaArmed = false;
 let reportedPlaying = null;
 function reportMedia() {
+  ensureCPUTimeline(); // Metadata may arrive after the first capture clock query.
   let playing = false;
   for (const m of document.querySelectorAll('video, audio')) {
     if (!m.paused && !m.ended && m.readyState >= 2) playing = true;
@@ -906,6 +1029,17 @@ function reportMedia() {
 function armMediaWatch() {
   if (mediaArmed) return reportMedia();
   mediaArmed = true;
+  document.addEventListener('seeking', (event) => {
+    if (!event.target?.matches?.('video, audio') || tl) return;
+    const following = !!liveMatch;
+    liveMatch = null;
+    shownWord = -1;
+    shown = null;
+    paintWords(-1);
+    if (following) setStatus('Identifying the new passage…', 'wait');
+    learnedTick();
+    chrome.runtime.sendMessage({ type: 'CAPTURE_RESET' }).catch(() => {});
+  }, true);
   setInterval(reportMedia, 500);
   reportMedia();
 }
@@ -915,15 +1049,40 @@ const LIVE_STATUS = {
   listening: 'Listening for recitation…',
   stopped: 'Stopped.',
 };
+const liveStatus = (status) => status === 'loading-model' && browserCPU ? 'Loading CPU model…' : LIVE_STATUS[status] || '';
 
 // ================================================================== messages
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'CAPTURE_CLOCK') {
+    const v = findVideo();
+    sendResponse(v ? { key: videoKey(location.href), time: v.currentTime, duration: v.duration,
+      playbackRate: v.playbackRate, seeking: v.seeking, paused: v.paused } : null);
+    return;
+  }
   if (msg?.type === 'TL_MEDIA') {
     const v = findVideo();
     sendResponse({ src: v ? v.currentSrc || v.src || '' : '', duration: v ? v.duration : 0 });
     return;
   }
   switch (msg?.type) {
+    case 'CPU_SYNC_STATUS': {
+      cpuAudioReady = msg.audioReady === true;
+      if (tl) break;
+      ensureCard();
+      const note = shadow.querySelector('#cpuSyncNote');
+      note.classList.toggle('hidden', !browserCPU);
+      const stages = { queued: 'Waiting for the helper…', download: 'Fetching the audio…',
+        transcribe: 'Recognising the recitation…', align: 'Timing every word…',
+        complete: 'Following this video', unavailable: 'Sync unavailable. Listening live…' };
+      note.textContent = stages[msg.stage] || 'Waiting for the helper…';
+      if (liveMatch) showLive(liveMatch);
+      else paintWords(Infinity);
+      ensureCPUTimeline();
+      break;
+    }
+    case 'LEARNED_LOAD':
+      loadLearned(msg.timeline, msg.visible !== false);
+      break;
     case 'TL_LOAD':
       loadTimeline(msg.timeline);
       break;
@@ -939,14 +1098,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     case 'CARD_SHOW':
       if (tl) break;
+      cpuAudioReady = false;
       ensureCard();
-      setStatus(LIVE_STATUS[msg.status] || 'Starting…', 'wait');
+      setStatus(liveStatus(msg.status) || 'Starting…', 'wait');
+      if (learned) loadLearned(learned);
+      else ensureCPUTimeline();
       break;
     case 'CARD_STATUS':
       if (tl) break;
       ensureCard();
       if (msg.status === 'error') setStatus(msg.error || 'Something went wrong.', 'err');
-      else if (!shown) setStatus(LIVE_STATUS[msg.status] || '', 'wait');
+      else if (!shown) setStatus(liveStatus(msg.status), 'wait');
       break;
     case 'CARD_UPDATE':
       if (!tl && msg.match) showLive(msg.match);

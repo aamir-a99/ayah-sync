@@ -1,0 +1,122 @@
+// Python matcher's normalization/offset voting, with contextual tie-breaking for refrains.
+export function normalizeArabic(text) {
+  return (text || '')
+    .replace(/[ؐ-ًؚ-ٰٟۖ-ۭـ]/g, '')
+    .replace(/[آأإٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+    .replace(/ؤ/g, 'و').replace(/ئ/g, 'ي').replace(/ء/g, '')
+    .replace(/[^ء-ي\s]/g, ' ').trim().split(/\s+/).filter(Boolean)
+    .map((w) => w[0] + w.slice(1).replace(/ا/g, '')).join(' ');
+}
+
+export class QuranMatcher {
+  constructor(arabic, english, surahs, indopak = {}) {
+    Object.assign(this, { arabic, english, surahs, indopak });
+    this.meta = new Map(surahs.map((s) => [s.number, s]));
+    this.tokens = [];
+    this.refs = [];
+    this.words = [];
+    this.trigrams = new Map();
+    this.orderedRefs = [];
+    for (const s of surahs) {
+      for (let a = 1; a <= s.ayahs; a++) {
+        const ref = `${s.number}:${a}`;
+        if (arabic[ref]) this.orderedRefs.push(ref);
+        (arabic[ref] || '').trim().split(/\s+/).forEach((word, wi) => {
+          const normalized = normalizeArabic(word);
+          if (!normalized) return;
+          for (const token of normalized.split(' ')) {
+            this.tokens.push(token);
+            this.refs.push(ref);
+            this.words.push(wi);
+          }
+        });
+      }
+    }
+    for (let i = 0; i < this.tokens.length - 2; i++) {
+      const key = this.tokens.slice(i, i + 3).join(' ');
+      if (!this.trigrams.has(key)) this.trigrams.set(key, []);
+      this.trigrams.get(key).push(i);
+    }
+  }
+
+  ayah(ref) {
+    if (!this.arabic[ref]) return null;
+    const [surah, ayah] = ref.split(':').map(Number);
+    return { ref, surah, ayah, arabic: this.arabic[ref], arabicIndopak: this.indopak[ref] || '',
+      translation: this.english[ref] || '', surahMeta: this.meta.get(surah) };
+  }
+
+  result(pos, score) {
+    pos = Math.max(0, Math.min(pos, this.refs.length - 1));
+    const a = this.ayah(this.refs[pos]);
+    if (!a) return null;
+    const nextRef = a.ayah < this.meta.get(a.surah).ayahs ? `${a.surah}:${a.ayah + 1}`
+      : a.surah < 114 ? `${a.surah + 1}:1` : null;
+    return { ...a, score, pos, word: this.words[pos],
+      wordCount: a.arabic.trim().split(/\s+/).length, next: this.ayah(nextRef || '') };
+  }
+
+  nearbyRefs(anchor) {
+    const i = this.orderedRefs.indexOf(this.refs[anchor]);
+    return new Set(this.orderedRefs.slice(Math.max(0, i - 1), i + 3));
+  }
+
+  match(text, anchor = null, { localOnly = false, nearbyRefs = null, evidenceOnly = false } = {}) {
+    const tokens = normalizeArabic(text).split(' ').filter(Boolean);
+    const vote = (index, size, contextual = false) => {
+      if (tokens.length < size) return null;
+      const votes = new Map();
+      const evidence = new Map();
+      for (let i = 0; i <= tokens.length - size; i++) {
+        for (const pos of index.get(tokens.slice(i, i + size).join(' ')) || []) {
+          votes.set(pos - i, (votes.get(pos - i) || 0) + 1);
+          const e = evidence.get(pos - i) || { last: 0, words: new Set() };
+          e.last = Math.max(e.last, pos + size - 1);
+          for (let k = 0; k < size; k++) e.words.add(i + k);
+          evidence.set(pos - i, e);
+        }
+      }
+      let best = null;
+      for (const [offset, count] of votes) {
+        const endpoint = offset + tokens.length - 1;
+        const behind = contextual && endpoint < anchor - 2;
+        const distance = contextual ? Math.abs(endpoint - anchor) : 0;
+        if (!best || count > best.count || (contextual && count === best.count &&
+            (Number(behind) < Number(best.behind) || (behind === best.behind && distance < best.distance)))) {
+          best = { offset, count, behind, distance };
+        }
+      }
+      if (!best) return null;
+      const e = evidence.get(best.offset);
+      // Do not advance into an unheard ayah because ASR appended/repeated words.
+      const end = evidenceOnly ? Math.min(best.offset + tokens.length - 1, e.last) : best.offset + tokens.length - 1;
+      const result = this.result(end, best.count / (tokens.length - size + 1));
+      if (evidenceOnly) {
+        result.evidenceWords = e.words.size;
+        result.alternatives = [...votes].filter(([, count]) => count === best.count).map(([offset]) => {
+          const e = evidence.get(offset);
+          const pos = Math.min(offset + tokens.length - 1, e.last);
+          return { pos, ref: this.refs[pos], score: result.score, evidenceWords: e.words.size };
+        });
+        result.ambiguous = result.alternatives.some((a) => a.ref !== result.ref);
+      }
+      return result;
+    };
+    const global = localOnly ? null : vote(this.trigrams, 3);
+    if (anchor == null) return global?.score >= 0.5 ? global : null;
+    const local = new Map();
+    for (let i = Math.max(0, anchor - 40); i < Math.min(this.tokens.length, anchor + 300) - 1; i++) {
+      if (nearbyRefs && (!nearbyRefs.has(this.refs[i]) || !nearbyRefs.has(this.refs[i + 1]))) continue;
+      const key = this.tokens.slice(i, i + 2).join(' ');
+      if (!local.has(key)) local.set(key, []);
+      local.get(key).push(i);
+    }
+    const nearby = vote(local, 2, true);
+    // Identical verses/refrains can be perfect global matches in several places.
+    // Prefer an equally strong nearby continuation; seeking clears the anchor.
+    if (nearby && nearby.pos >= anchor - 2 && nearby.score >= Math.max(0.2, (global?.score || 0) - 0.05)) return nearby;
+    if (global?.score >= 0.6) return global;
+    if (nearby?.score >= 0.2 && nearby.pos >= anchor - 20) return nearby;
+    return global?.score >= 0.45 ? global : null;
+  }
+}

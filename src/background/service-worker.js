@@ -15,7 +15,11 @@
  *                                                      └─▶ content script (card) in the captured tab
  */
 
+import { LearnedTimeline } from '../timeline/learned.js';
+
 const OFFSCREEN_URL = 'src/offscreen/offscreen.html';
+let learned = null;
+let backgroundSocket = null;
 
 const state = {
   capturing: false,
@@ -27,6 +31,10 @@ const state = {
   mediaPlaying: true, // captured tab's play/pause state
   debug: null, // last human-readable working state (diagnostics)
   error: null,
+  backend: 'helper',
+  captureEpoch: 0,
+  learning: null,
+  background: null,
   // Whole-video sync: idle | working | ready | error
   sync: { status: 'idle', tabId: null, key: null, stage: null, pct: 0, summary: null, error: null },
 };
@@ -46,6 +54,8 @@ const restored = chrome.storage.session
     // A sync that was mid-flight when the worker was recycled lost its socket.
     if (state.sync?.status === 'working') {
       state.sync = { ...state.sync, status: 'error', error: 'The sync was interrupted. Try again.' };
+      if (state.background) state.background = { ...state.background, stage: 'unavailable',
+        audioReady: false, error: state.sync.error };
     }
   })
   .catch(() => {});
@@ -131,6 +141,56 @@ async function tellCard(tabId, message) {
   }
 }
 
+async function captureClock() {
+  const tabId = await resolveTabId();
+  if (!state.capturing || tabId == null) return null;
+  const epoch = state.captureEpoch;
+  let timer;
+  try {
+    // A busy or frozen tab must not leave the caller waiting forever.
+    const clock = await Promise.race([
+      chrome.tabs.sendMessage(tabId, { type: 'CAPTURE_CLOCK' }),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), 1500); }),
+    ]);
+    return clock ? { ...clock, captureEpoch: epoch } : null;
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
+async function prepareLearning(clock) {
+  if (!state.capturing || state.backend !== 'browser' || !clock?.key ||
+      clock.captureEpoch !== state.captureEpoch || !Number.isFinite(clock.duration) || clock.duration <= 0) return null;
+  if (!learned || learned.key !== clock.key) {
+    const k = `qltLearned_${state.tabId}`;
+    const saved = (await chrome.storage.session.get(k).catch(() => ({})))[k];
+    if (!state.capturing || clock.captureEpoch !== state.captureEpoch) return null;
+    learned = new LearnedTimeline(clock.key, clock.duration, saved);
+  }
+  if (Math.abs(learned.duration - clock.duration) > 2) return null; // Different player/ad.
+  state.learning = { key: learned.key, markers: learned.entries.length, partial: true };
+  return learned;
+}
+
+async function recordLearning(match, clock) {
+  if (!clock || clock.captureEpoch !== state.captureEpoch || !state.capturing) return;
+  const tabId = state.tabId;
+  const timeline = await prepareLearning(clock);
+  if (!state.capturing || clock.captureEpoch !== state.captureEpoch || tabId !== state.tabId) return;
+  if (!timeline?.observe(match, clock.time)) return;
+  const snapshot = timeline.snapshot();
+  state.learning.markers = snapshot.entries.length;
+  await chrome.storage.session.set({ [`qltLearned_${tabId}`]: snapshot }).catch(() => {});
+  if (!state.capturing || clock.captureEpoch !== state.captureEpoch) return;
+  await tellCard(tabId, { type: 'LEARNED_LOAD', timeline: snapshot,
+    visible: state.displayTabId === state.tabId });
+}
+
+async function tellCPUSyncStatus() {
+  if (!state.capturing || state.backend !== 'browser') return;
+  const tabId = await resolveDisplayTabId();
+  if (state.capturing && tabId != null) await tellCard(tabId, { type: 'CPU_SYNC_STATUS',
+    stage: state.background?.stage || 'live', audioReady: state.background?.audioReady === true });
+}
+
 // --- Whole-video sync ---------------------------------------------------------
 /** Same key the content script derives, so a timeline is only reused for the
  *  video it was made for. */
@@ -198,17 +258,22 @@ function summarize(timeline) {
 
 const IDLE_SYNC = { status: 'idle', tabId: null, key: null, stage: null, pct: 0, summary: null, error: null };
 
-async function startSync(force = false) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+async function startSync(force = false, backgroundTab = null) {
+  const tab = backgroundTab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+  const background = !!backgroundTab;
   if (!tab?.id || !/^https?:/.test(tab.url || '')) {
     state.sync = { ...IDLE_SYNC, status: 'error', error: 'Open a page with a video first.' };
     return flushState();
   }
-  if (state.capturing) await teardown(); // one mode at a time
+  if (state.capturing && !background) await teardown();
   const key = videoKey(tab.url);
+  const job = background ? crypto.randomUUID() : null;
+  const active = () => !background || (state.capturing && state.tabId === tab.id && state.background?.id === job);
+  if (background) state.background = { id: job, stage: 'queued', pct: 0, audioReady: false };
   state.sync = { ...IDLE_SYNC, status: 'working', tabId: tab.id, key, stage: 'queued' };
   flushState();
-  tellCard(tab.id, { type: 'TL_PROGRESS', text: STAGE_TEXT.queued });
+  if (background) tellCPUSyncStatus();
+  else tellCard(tab.id, { type: 'TL_PROGRESS', text: STAGE_TEXT.queued });
 
   // The page's own link to the video file: the helper's fallback when it can't
   // download from the page address (Instagram / TikTok often need a login).
@@ -216,21 +281,28 @@ async function startSync(force = false) {
   try {
     media = (await chrome.tabs.sendMessage(tab.id, { type: 'TL_MEDIA' }))?.src || null;
   } catch {}
+  if (!active()) return;
 
   let ws;
   let settled = false;
   const fail = (error) => {
     if (settled) return;
     settled = true;
+    if (!active()) { ws?.close(); return; }
     state.sync = { ...state.sync, status: 'error', error };
     flushState();
-    tellCard(tab.id, { type: 'TL_PROGRESS', text: error, error: true });
+    if (background) {
+      Object.assign(state.background, { stage: 'unavailable', error, audioReady: false });
+      tellCPUSyncStatus();
+      broadcastState();
+    } else tellCard(tab.id, { type: 'TL_PROGRESS', text: error, error: true });
     try {
       ws.close();
     } catch {}
   };
   try {
     ws = new WebSocket(HELPER_URL);
+    if (background) backgroundSocket = ws;
   } catch {
     return fail(HELPER_DOWN);
   }
@@ -238,6 +310,7 @@ async function startSync(force = false) {
   ws.onerror = () => fail(HELPER_DOWN);
   ws.onclose = () => fail('Lost the connection to the helper.');
   ws.onmessage = async (ev) => {
+    if (!active()) { ws.close(); return; }
     let d;
     try {
       d = JSON.parse(ev.data);
@@ -245,11 +318,16 @@ async function startSync(force = false) {
       return;
     }
     if (d.type === 'align_progress') {
-      if (state.sync.stage !== d.stage) {
+      if (!background && state.sync.stage !== d.stage) {
         tellCard(tab.id, { type: 'TL_PROGRESS', text: STAGE_TEXT[d.stage] || 'Working…' });
       }
       state.sync.stage = d.stage;
       state.sync.pct = d.pct;
+      if (background) {
+        Object.assign(state.background, { stage: d.stage, pct: d.pct,
+          audioReady: ['transcribe', 'align'].includes(d.stage) });
+        tellCPUSyncStatus();
+      }
       broadcastState();
     } else if (d.type === 'align_error') {
       fail(d.error || 'Could not sync this video.');
@@ -257,8 +335,13 @@ async function startSync(force = false) {
       settled = true;
       const timeline = d.timeline;
       await chrome.storage.session.set({ [`qltTL_${tab.id}`]: { key, timeline } }).catch(() => {});
+      if (!active()) { ws.close(); return; }
       state.sync = { ...IDLE_SYNC, status: 'ready', tabId: tab.id, key, pct: 1, summary: summarize(timeline) };
       flushState();
+      if (background) {
+        Object.assign(state.background, { stage: 'complete', pct: 1, audioReady: true });
+        tellCPUSyncStatus();
+      }
       tellCard(tab.id, { type: 'TL_LOAD', timeline });
       try {
         ws.close();
@@ -287,6 +370,9 @@ async function clearSync(tabId) {
  * clears Chrome's "Cannot capture a tab with an active stream" error.
  */
 async function teardown() {
+  state.background = null;
+  backgroundSocket?.close();
+  backgroundSocket = null;
   if (await hasOffscreen()) {
     try {
       await chrome.runtime.sendMessage({ target: 'offscreen', type: 'STOP_CAPTURE' });
@@ -301,10 +387,14 @@ async function teardown() {
     }
   }
   state.capturing = false;
+  state.captureEpoch++;
   state.tabId = null;
   state.displayTabId = null;
   state.status = 'idle';
   state.modelProgress = null;
+  state.learning = null;
+  state.background = null;
+  learned = null;
 }
 
 async function startCapture() {
@@ -339,14 +429,32 @@ async function startCapture() {
   state.error = null;
   state.lastMatch = null;
 
+  const { qltRecognition = 'helper' } = await chrome.storage.local.get('qltRecognition');
+  state.backend = qltRecognition;
+  state.captureEpoch++;
+
   await chrome.runtime.sendMessage({
     target: 'offscreen',
     type: 'START_CAPTURE',
     streamId,
+    backend: qltRecognition,
   });
 
-  await tellCard(tab.id, { type: 'CARD_SHOW', status: 'loading-model' });
+  await tellCard(tab.id, { type: 'CARD_SHOW', status: state.status });
+  await tellCPUSyncStatus();
   await tellCard(tab.id, { type: 'CARD_WATCH_MEDIA' }); // watch this tab's play/pause
+  if (qltRecognition === 'browser') {
+    const clock = await captureClock();
+    const timeline = await prepareLearning(clock);
+    if (timeline) await tellCard(tab.id, { type: 'LEARNED_LOAD', timeline: timeline.snapshot() });
+    startSync(false, tab).catch((error) => {
+      if (state.capturing && state.tabId === tab.id) {
+        state.background = { stage: 'unavailable', error: error.message, audioReady: false };
+        tellCPUSyncStatus();
+        broadcastState();
+      }
+    });
+  }
   broadcastState();
   updateBadge();
 }
@@ -395,6 +503,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target === 'offscreen') return;
 
   switch (msg?.type) {
+    case 'CAPTURE_CLOCK':
+      captureClock().then(sendResponse);
+      return true;
+    case 'CAPTURE_RESET':
+      (async () => {
+        const capId = await resolveTabId();
+        if (state.capturing && sender?.tab?.id === capId) {
+          state.lastMatch = null;
+          state.captureEpoch++;
+          learned?.breakRun();
+          state.debug = 'Seeking — confirming the new passage…';
+          broadcastState();
+          chrome.runtime.sendMessage({ target: 'offscreen', type: 'RESET_CAPTURE' }).catch(() => {});
+        }
+      })();
+      return true;
     case 'TR_GET':
       // Translations in other languages ship inside the extension (public/tr).
       (async () => {
@@ -451,7 +575,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const k = `qltTL_${id}`;
         const r = id != null ? await chrome.storage.session.get(k).catch(() => ({})) : {};
         const saved = r[k];
-        sendResponse(saved && saved.key === videoKey(msg.url || '') ? { timeline: saved.timeline } : {});
+        if (saved && saved.key === videoKey(msg.url || '')) {
+          sendResponse({ timeline: saved.timeline });
+        } else {
+          const local = id != null ? (await chrome.storage.session.get(`qltLearned_${id}`).catch(() => ({})))[`qltLearned_${id}`] : null;
+          sendResponse(local?.key === videoKey(msg.url || '') ?
+            { learned: local, learning: state.capturing && state.tabId === id } : {});
+        }
       })();
       return true;
 
@@ -462,8 +592,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const capId = await resolveTabId();
         if (sender?.tab?.id != null && sender.tab.id === capId) {
           state.mediaPlaying = msg.playing !== false;
+          chrome.runtime.sendMessage({ target: 'offscreen', type: 'MEDIA_PLAYING', playing: state.mediaPlaying }).catch(() => {});
           const disp = await resolveDisplayTabId();
           if (disp != null) tellCard(disp, { type: 'CARD_MEDIA', playing: state.mediaPlaying });
+          broadcastState();
         }
       })();
       return true;
@@ -485,7 +617,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case 'START':
-      startCapture();
+      startCapture().catch((error) => {
+        setError(error.message || String(error));
+        closeOffscreen();
+      });
       sendResponse?.({ ok: true });
       return true;
 
@@ -519,6 +654,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       (async () => {
         const tabId = await resolveDisplayTabId();
         if (msg.match) {
+          if (msg.clock && msg.clock.captureEpoch !== state.captureEpoch) return;
+          await recordLearning(msg.match, msg.clock);
+          if (msg.clock && (!state.capturing || msg.clock.captureEpoch !== state.captureEpoch)) return;
           state.lastMatch = msg.match;
           if (tabId != null) tellCard(tabId, { type: 'CARD_UPDATE', match: msg.match });
         } else if (tabId != null) {
@@ -539,6 +677,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const tabId = await resolveDisplayTabId();
         if (tabId != null)
           tellCard(tabId, { type: 'CARD_STATUS', status: 'error', error: msg.error });
+        await closeOffscreen(); // Do not report a stopped recognizer as an orphaned active capture.
       })();
       return true;
   }
@@ -551,6 +690,7 @@ async function moveCardTo(tabId) {
   state.displayTabId = tabId;
   // Draw the card on the newly-active tab with the latest known verse/status.
   await tellCard(tabId, { type: 'CARD_SHOW', status: state.status });
+  await tellCPUSyncStatus();
   if (state.lastMatch) await tellCard(tabId, { type: 'CARD_UPDATE', match: state.lastMatch });
   else await tellCard(tabId, { type: 'CARD_STATUS', status: state.status });
   await tellCard(tabId, { type: 'CARD_MEDIA', playing: state.mediaPlaying }); // keep pause state
@@ -574,6 +714,7 @@ chrome.windows.onFocusChanged.addListener(async (winId) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (state.capturing && tabId === state.tabId) stopCapture();
   chrome.storage.session.remove(`qltTL_${tabId}`).catch(() => {});
+  chrome.storage.session.remove(`qltLearned_${tabId}`).catch(() => {});
   if (state.sync.tabId === tabId) {
     state.sync = { ...IDLE_SYNC };
     flushState();

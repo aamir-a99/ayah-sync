@@ -135,8 +135,43 @@ Load `dist/` as an unpacked extension. The helper lives in `server/`; see
 [server/README.md](server/README.md). `harness/` runs the built extension in an
 ordinary browser tab for testing.
 
+### Browser CPU option (experimental)
+
+Select **Recognition → Browser CPU**, then **Sync verses to this video**. A
+bundled quantized `tarteel-ai/whisper-tiny-ar-quran` model runs locally through
+WASM, showing verses/translations and learning approximate seek markers as audio
+plays. The timeline is always enabled; unheard sections remain unsynced. Markers
+last for the tab's browser session. Recognition may be delayed or fail on slow
+or busy devices. The existing helper mode remains the default.
+
+CPU mode also requests the existing helper sync in the background. If running,
+the Python helper uses yt-dlp/FFmpeg and its configured recognition/alignment
+models to produce a full word-timed timeline. The card switches to it when ready.
+Without the helper, or if downloading fails, live CPU learning continues.
+Optional approximate word highlighting defaults to on and stays inactive until
+the helper has fetched audio. Both modes use the same sync progress/ready UI;
+background progress does not hide recognized verses on the card.
+Only process media you are permitted to download.
+
+To include the CPU model in a build, export it once before `npm run build`:
+
+```bash
+python -m pip install 'optimum-onnx[onnxruntime]' 'transformers<5'
+python scripts/export-browser-model.py
+```
+
+The export downloads the model weights; runtime inference uses bundled files
+and does not upload audio. Generated model files are not committed.
+Run `npm run test:local` for unit tests. After exporting and building,
+`BROWSER_PATH=/path/to/chrome npm run test:capture` tests tab capture, recognition
+and timeline navigation; it downloads a short test recording if needed.
+On Linux, `bash scripts/run-browser-local.sh` opens an isolated Brave/Chrome
+profile with the extension loaded, GPU disabled and no CPU throttling.
+
 ## Credits
 
+- Browser speech model: [Tarteel Whisper Tiny Arabic Quran](https://huggingface.co/tarteel-ai/whisper-tiny-ar-quran)
+  (Apache-2.0), exported to quantized ONNX and run with Transformers.js.
 - Quran text and translations: [Al-Quran Cloud](https://alquran.cloud) and
   [quran.com](https://quran.com). Translators: Saheeh International (English),
   Fateh Muhammad Jalandhry (Urdu), Indonesian Ministry of Religious Affairs,

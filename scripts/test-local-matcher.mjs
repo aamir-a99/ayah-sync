@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { QuranMatcher, normalizeArabic } from '../src/matcher/match.js';
+import { AudioWindow } from '../src/offscreen/audio-window.js';
+import './test-local-tracking.mjs';
+import './test-learned-timeline.mjs';
+import './test-helper-background.mjs';
+
+const data = (name) => JSON.parse(readFileSync(new URL(`../src/data/${name}.json`, import.meta.url)));
+const arabic = data('quran-uthmani');
+const matcher = new QuranMatcher(arabic, data('quran-en'), data('surahs'), data('quran-indopak'));
+assert.equal(normalizeArabic('ٱلْعَٰلَمِينَ'), normalizeArabic('العالمين'));
+assert.equal(matcher.match(arabic['1:1']).ref, '1:1');
+assert.equal(matcher.match(arabic['2:255']).ref, '2:255');
+assert.equal(matcher.match(''), null);
+assert.equal(matcher.match('مرحبا'), null);
+const previous = matcher.match(arabic['1:2']);
+assert.equal(matcher.match(arabic['1:3'], previous.pos).ref, '1:3', 'prefer current context over identical opening words');
+const window = new AudioWindow(4);
+window.push(new Float32Array([1, 2, 3]));
+assert.deepEqual([...window.snapshot()], [1, 2, 3]);
+window.push(new Float32Array([4, 5, 6]));
+assert.deepEqual([...window.snapshot()], [3, 4, 5, 6]);
+assert.equal(window.total, 6);
+window.reset();
+assert.deepEqual([...window.snapshot()], []);
+
+for (const ref of ['1:2', '1:7', '2:255', '67:1', '112:1']) {
+  const match = matcher.match(arabic[ref]);
+  assert.equal(match.ref, ref);
+  assert.equal(match.score, 1);
+}
+console.log('Arabic normalization, verse matching and audio buffer checks passed.');

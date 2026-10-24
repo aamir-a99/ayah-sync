@@ -18,7 +18,7 @@
         <p class="eyebrow">This tab</p>
         <h1 id="tabTitle">—</h1>
         <button class="primary" id="syncBtn">Sync verses to this video</button>
-        <p class="note">
+        <p class="note" id="modeNote">
           One pass over the audio, then every word follows the video — pause, rewind and replay freely.
         </p>
         <button class="link" id="liveBtn">It’s a live stream — listen instead</button>
@@ -42,10 +42,10 @@
       </section>
 
       <section class="stage" id="stageLive" hidden>
-        <p class="eyebrow">Listening live</p>
+        <p class="eyebrow" id="liveHeading">Listening live</p>
         <h1 id="liveRef">Waiting for recitation…</h1>
         <button class="primary stop" id="stopBtn">Stop listening</button>
-        <p class="note">Live mode estimates the word between updates. For a normal video, syncing is exact.</p>
+        <p class="note" id="liveNote">Live mode estimates the word between updates. For a normal video, syncing is exact.</p>
       </section>
 
       <section class="stage" id="stageHelper" hidden>
@@ -62,6 +62,17 @@
     </main>
 
     <section class="reading" aria-label="Reading settings">
+      <label class="set">
+        <span>Recognition</span>
+        <select id="recognition" class="pick">
+          <option value="helper">Nvidia GPU</option>
+          <option value="browser">Browser CPU</option>
+        </select>
+      </label>
+      <label class="set" id="cpuHighlightSetting" hidden title="Estimated between recognition updates, not precise word timings.">
+        <span>Word highlighting (approximate)</span>
+        <input type="checkbox" class="switch" id="cpuHighlight" />
+      </label>
       <div class="preview" id="preview" dir="rtl" lang="ar"></div>
       <div class="set">
         <span>Script</span>
