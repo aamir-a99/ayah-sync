@@ -1,3 +1,6 @@
+import { displayWordIndex } from '../cpu/display-word.js';
+const DEV_MODE = import.meta.env.DEV;
+
 /**
  * Content script: the verse card.
  *
@@ -58,14 +61,24 @@ let prevTime = 0;
 let liveRaf = null;
 let mediaPlaying = true;
 let browserCPU = false;
-let cpuHighlight = false;
+let cpuHighlight = true;
+let cpuLookaheadPreference = true;
+let cpuHighlightPreference;
+let highlightTimer = null;
+let cpuBuffer = null;
+let bufferRaf = null;
+let bufferedWord = -2;
+let bufferedRef = null;
+let cpuBufferedMode = false;
 const MAX_DRIFT_MS = 7000;
 const MAX_LEAD = 4;
 
 // =============================================================== preferences
-chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCardWidth', 'qltAmbient', 'qltLang', 'qltRecognition', 'qltCPUHighlight'], (v) => {
+chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCardWidth', 'qltAmbient', 'qltLang', 'qltRecognition', 'qltCPUHighlight', 'qltCPULookahead'], (v) => {
   browserCPU = v?.qltRecognition === 'browser';
-  cpuHighlight = v?.qltCPUHighlight === true;
+  cpuLookaheadPreference = v?.qltCPULookahead !== false;
+  cpuHighlightPreference = v?.qltCPUHighlight;
+  cpuHighlight = cpuHighlightPreference ?? cpuLookaheadPreference;
   if (v?.qltLang) lang = v.qltLang;
   ambient = v?.qltAmbient !== false;
   showTranslation = v?.showTranslation !== false;
@@ -77,9 +90,11 @@ chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCa
 });
 chrome.storage?.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
-  if (changes.qltRecognition || changes.qltCPUHighlight) {
+  if (changes.qltRecognition || changes.qltCPUHighlight || changes.qltCPULookahead) {
     if (changes.qltRecognition) browserCPU = changes.qltRecognition.newValue === 'browser';
-    if (changes.qltCPUHighlight) cpuHighlight = changes.qltCPUHighlight.newValue === true;
+    if (changes.qltCPUHighlight) cpuHighlightPreference = changes.qltCPUHighlight.newValue;
+    if (changes.qltCPULookahead) cpuLookaheadPreference = changes.qltCPULookahead.newValue !== false;
+    cpuHighlight = cpuHighlightPreference ?? cpuLookaheadPreference;
     if (liveMatch) showLive(liveMatch);
     else if (browserCPU && !tl) paintWords(Infinity);
   }
@@ -119,6 +134,7 @@ function rerender() {
   shown = null;
   builtText = '';
   renderAyah(a, a.__next || null);
+  if (!tl && browserCPU && liveMatch) paintCpuHighlight(liveMatch.highlight);
 }
 
 // ===================================================================== fonts
@@ -136,16 +152,13 @@ function fetchFonts() {
   if (fontBytes) return fontBytes;
   fontBytes = Promise.all(
     FONT_FILES.map(async ([name, file, desc]) => {
-      let buf;
-      try {
-        buf = await (await fetch(chrome.runtime.getURL(`fonts/${file}`))).arrayBuffer();
-      } catch {
-        // The page's own security policy blocked the request: get the bytes
-        // through the service worker instead.
-        const r = await chrome.runtime.sendMessage({ type: 'FONT_GET', file });
-        const bin = atob(r?.b64 || '');
-        buf = Uint8Array.from(bin, (c) => c.charCodeAt(0)).buffer;
-      }
+      // Fetch in the extension, not the host page's security context. Direct
+      // extension URLs can be rejected by sites such as YouTube even when the
+      // files are web-accessible; falling back afterwards still logs errors.
+      const r = await chrome.runtime.sendMessage({ type: 'FONT_GET', file });
+      if (!r?.b64) throw new Error(`Bundled font unavailable: ${file}`);
+      const bin = atob(r.b64);
+      const buf = Uint8Array.from(bin, (c) => c.charCodeAt(0)).buffer;
       return [name, buf, desc];
     }),
   );
@@ -175,13 +188,8 @@ function ensureCard() {
   host.style.cssText = 'all:initial; position:fixed; z-index:2147483647; top:76px; right:24px;';
   shadow = host.attachShadow({ mode: 'open' });
 
-  const font = (f) => chrome.runtime.getURL(`fonts/${f}`);
   shadow.innerHTML = `
     <style>
-      @font-face { font-family:'QLT-Uthmani'; src:url('${font('uthmani.woff2')}') format('woff2'); font-display:swap; }
-      @font-face { font-family:'QLT-IndoPak'; src:url('${font('indopak.woff2')}') format('woff2'); font-display:swap; }
-      @font-face { font-family:'QLT-Text'; src:url('${font('figtree.woff2')}') format('woff2'); font-weight:400 700; font-display:swap; }
-
       :host {
         all: initial;
         --ar-size: 24px; --card-w: 360px;
@@ -248,6 +256,10 @@ function ensureCard() {
 
       .body { padding: 6px 18px 16px; }
       .status { font-size: 14px; line-height: 1.5; color: var(--ink-2); padding: 8px 0 2px; }
+      .restart-cpu { margin-top: 10px; padding: 8px 14px; border: 1px solid var(--green); border-radius: 8px; background: var(--wash); color: var(--ink); font: inherit; cursor: pointer; }
+      .restart-cpu:disabled { cursor: wait; }
+      .diag { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--rule); color: var(--ink-3);
+        font: 500 10.5px/1.4 'QLT-Text', system-ui, sans-serif; overflow-wrap: anywhere; }
       .arabic {
         direction: rtl; text-align: right; font-family: var(--ar-font);
         font-size: var(--ar-size); line-height: 2.05; color: var(--ink); padding-top: 2px;
@@ -303,9 +315,11 @@ function ensureCard() {
       </div>
       <div class="body">
         <div class="status" id="status">Starting…</div>
+        <button class="restart-cpu hidden" id="restartCpu">Sync this video</button>
         <div id="verse" class="hidden">
           <div class="arabic" id="arabic" lang="ar"></div>
           <div class="trans" id="trans" dir="auto"></div>
+          <div class="diag hidden" id="debug"></div>
           <div class="next hidden" id="nextWrap">
             <div class="lbl">Next</div>
             <div class="arabic" id="nextArabic" lang="ar"></div>
@@ -322,7 +336,7 @@ function ensureCard() {
     ribbon: $('ribbon'), spans: $('spans'), fill: $('fill'), head: $('head'),
     bar: $('bar'), where: $('where'), seek: $('seek'),
     prev: $('prev'), again: $('again'), next: $('nextBtn'), close: $('close'), pop: $('pop'), play: $('playBtn'), icoPlay: $('icoPlay'), icoPause: $('icoPause'), card: shadow.querySelector('.card'),
-    status: $('status'), verse: $('verse'), arabic: $('arabic'), trans: $('trans'),
+    status: $('status'), restartCpu: $('restartCpu'), verse: $('verse'), arabic: $('arabic'), trans: $('trans'), debug: $('debug'),
     nextWrap: $('nextWrap'), nextArabic: $('nextArabic'),
   };
 
@@ -337,6 +351,21 @@ function ensureCard() {
   });
   els.pop.addEventListener('click', togglePip);
   els.play.addEventListener('click', toggleMedia);
+  els.restartCpu.addEventListener('click', async () => {
+    if (!browserCPU || els.restartCpu.disabled) return;
+    els.restartCpu.disabled = true;
+    els.restartCpu.textContent = 'Starting CPU sync…';
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'CPU_RESTART_VIDEO' });
+      if (result?.error) throw new Error(result.error);
+    } catch (error) {
+      if (!els) return;
+      setStatus(error.message || 'Could not start CPU sync.', 'err');
+      els.restartCpu.disabled = false;
+      els.restartCpu.textContent = 'Try CPU sync again';
+      els.restartCpu.classList.remove('hidden');
+    }
+  });
   els.prev.addEventListener('click', () => seekAyah(-1));
   els.again.addEventListener('click', () => seekAyah(0));
   els.next.addEventListener('click', () => seekAyah(1));
@@ -485,10 +514,16 @@ function restartLoops() {
   caf(liveRaf);
   tlRaf = liveRaf = null;
   if (tl) tlRaf = raf(tlTick);
-  if (liveMatch) liveRaf = raf(liveTick);
+  if (liveMatch && !browserCPU) liveRaf = raf(liveTick);
+  caf(bufferRaf);
+  bufferRaf = cpuBuffer ? raf(bufferTick) : null;
 }
 
 function hideCard() {
+  caf(bufferRaf);
+  bufferRaf = null;
+  cpuBuffer = null;
+  bufferedRef = null;
   if (inPip && host) {
     host.dataset.pipGone = '1';
     inPip = false;
@@ -497,6 +532,7 @@ function hideCard() {
   caf(liveRaf);
   liveRaf = null;
   liveMatch = null;
+  clearTimeout(highlightTimer);
   shown = null;
   builtText = '';
   wordEls = [];
@@ -512,6 +548,7 @@ function setStatus(text, tone) {
   els.verse.classList.add('hidden');
   els.status.classList.remove('hidden');
   els.status.textContent = text;
+  els.restartCpu.classList.add('hidden');
   els.where.innerHTML = `<span class="live ${tone || 'wait'}"></span>Ayah Sync`;
   shown = null;
   builtText = '';
@@ -637,13 +674,18 @@ function loadTranslations(refs) {
 function renderAyah(a, next) {
   ensureCard();
   const text = arabicOf(a);
-  if (shown && shown.ref === a.ref && text === builtText && shown.__next === next) return;
+  if (shown && shown.ref === a.ref && text === builtText && shown.__next?.ref === next?.ref) {
+    a.__next = next;
+    shown = a;
+    return;
+  }
   if (lang !== 'en' && !trMap[a.ref]) loadTranslations([a.ref, next?.ref]);
   a.__next = next;
   shown = a;
   builtText = text;
 
   els.status.classList.add('hidden');
+  els.restartCpu.classList.add('hidden');
   els.verse.classList.remove('hidden');
   const meta = a.surahMeta || {};
   const name = meta.englishName || `Surah ${a.surah}`;
@@ -684,7 +726,7 @@ function paintWords(cur) {
   if (browserCPU && !cpuHighlight && !tl) cur = Infinity;
   for (let i = 0; i < wordEls.length; i++) {
     const el = wordEls[i];
-    const state = i < cur ? 1 : i === cur ? 2 : 0;
+    const state = i === cur ? 2 : browserCPU && !tl ? 1 : i < cur ? 1 : 0;
     if (el._s === state) continue;
     el._s = state;
     el.classList.toggle('done', state === 1);
@@ -741,6 +783,7 @@ function clock(t) {
 
 function loadTimeline(timeline) {
   if (!timeline?.ayahs?.length) return;
+  clearTimeout(highlightTimer);
   caf(liveRaf);
   liveRaf = null;
   liveMatch = null;
@@ -876,10 +919,10 @@ function showLive(m) {
   liveMatch = m;
   const ayahChanged = !shown || shown.ref !== m.ref;
   renderAyah(m, m.next || null);
-  if (browserCPU && !cpuHighlight) {
+  if (browserCPU) {
     caf(liveRaf);
     liveRaf = null;
-    paintWords(Infinity);
+    paintCpuHighlight(m.highlight);
     return;
   }
   const now = performance.now();
@@ -904,6 +947,22 @@ function showLive(m) {
   }
 }
 
+function paintCpuHighlight(highlight) {
+  clearTimeout(highlightTimer);
+  highlightTimer = null;
+  const remaining = (highlight?.expiresAt || 0) - Date.now();
+  if (!cpuHighlight || !highlight || highlight.ref !== liveMatch?.ref || highlight.word < 0 || remaining <= 0) {
+    paintWords(Infinity);
+    return;
+  }
+  // No rate extrapolation: show only the last acoustically supported word.
+  // Expiry includes inference/transport latency and clears silence/stale work.
+  shownWord = displayWordIndex(liveMatch.arabic, builtText, highlight.word);
+  if (shownWord < 0) return paintWords(Infinity);
+  paintWords(shownWord);
+  highlightTimer = setTimeout(() => paintWords(Infinity), Math.min(remaining, 1000));
+}
+
 function liveTick() {
   if (!els || !liveMatch || wordEls.length === 0) {
     liveRaf = null;
@@ -919,6 +978,47 @@ function liveTick() {
   const target = Math.min(anchorWord + drift, anchorWord + MAX_LEAD, wordEls.length - 1);
   shownWord = Math.min(Math.max(shownWord, Math.floor(target)), wordEls.length - 1); // forward only
   paintWords(shownWord);
+}
+
+function bufferTick() {
+  if (!cpuBuffer || !els) { bufferRaf = null; return; }
+  bufferRaf = raf(bufferTick);
+  const v = findVideo();
+  if (!v) return;
+  const t = v.currentTime;
+  const valid = videoKey(location.href) === cpuBuffer.key &&
+    Math.abs(v.duration - cpuBuffer.duration) <= 5 && !v.seeking;
+  const cue = valid && cpuBuffer.ready === true && t >= cpuBuffer.from && t <= cpuBuffer.until + 0.5
+    ? cpuBuffer.cues.findLast((c) => c.t0 <= t) : null;
+  if (!cue) {
+    const text = videoKey(location.href) === cpuBuffer.key
+      ? cpuBuffer.ready !== true
+        ? `CPU sync · preparing first ${Math.ceil(cpuBuffer.requiredSeconds || 12)}s · ${Math.floor(cpuBuffer.preparedSeconds || 0)}s recognized…`
+        : 'CPU look-ahead · preparing this position…'
+      : 'Video changed — start CPU sync again.';
+    if (shown || els.status.textContent !== text) setStatus(text, 'wait');
+    if (!valid && videoKey(location.href) !== cpuBuffer.key && browserCPU) {
+      els.restartCpu.classList.remove('hidden');
+    }
+    return;
+  }
+  const changed = shown?.ref !== cue.match.ref;
+  liveMatch = cue.match;
+  renderAyah(cue.match, cue.match.next);
+  setPlayIcon(!v.paused);
+  const timing = cue.highlightWords?.length ? cue.highlightWords : cue.words;
+  const span = cpuHighlight ? timing.findLast((w) => w.start <= t && t < w.end) : null;
+  const word = span?.word ?? -1;
+  if (changed || word !== bufferedWord) {
+    bufferedWord = word;
+    const display = word < 0 ? -1 : displayWordIndex(cue.match.arabic, builtText, word);
+    paintWords(display < 0 ? Infinity : display);
+  }
+  if (bufferedRef !== cue.match.ref) {
+    bufferedRef = cue.match.ref;
+    chrome.runtime.sendMessage({ type: 'BUFFER_POSITION', match: cue.match,
+      captureEpoch: cpuBuffer.captureEpoch }).catch(() => {});
+  }
 }
 
 // Reports this page's play/pause so the live estimate freezes with the video.
@@ -940,7 +1040,12 @@ function armMediaWatch() {
   document.addEventListener('seeking', (event) => {
     if (!event.target?.matches?.('video, audio') || tl) return;
     const following = !!liveMatch;
+    cpuBuffer = null;
+    bufferedRef = null;
+    caf(bufferRaf);
+    bufferRaf = null;
     liveMatch = null;
+    clearTimeout(highlightTimer);
     shownWord = -1;
     shown = null;
     paintWords(-1);
@@ -956,8 +1061,10 @@ const LIVE_STATUS = {
   listening: 'Listening for recitation…',
   stopped: 'Stopped.',
 };
-const liveStatus = (status) => browserCPU && status === 'listening' ? 'Listening live'
-  : status === 'loading-model' && browserCPU ? 'Loading CPU model…' : LIVE_STATUS[status] || '';
+const liveStatus = (status) => browserCPU && cpuBufferedMode
+  ? status === 'loading-model' ? 'CPU sync · preparing audio…' : status === 'listening' ? 'CPU sync · preparing upcoming ayahs…' : LIVE_STATUS[status] || ''
+  : browserCPU && status === 'listening' ? 'Listening live · identifying recitation…'
+  : status === 'loading-model' && browserCPU ? 'Listening live · loading CPU model…' : LIVE_STATUS[status] || '';
 
 // ================================================================== messages
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -969,7 +1076,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg?.type === 'TL_MEDIA') {
     const v = findVideo();
-    sendResponse({ src: v ? v.currentSrc || v.src || '' : '', duration: v ? v.duration : 0 });
+    sendResponse({ src: v ? v.currentSrc || v.src || '' : '', duration: v ? v.duration : 0, href: location.href });
     return;
   }
   switch (msg?.type) {
@@ -988,17 +1095,49 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     case 'CARD_SHOW':
       if (tl) break;
+      cpuBufferedMode = msg.mode === 'lookahead';
       ensureCard();
       setStatus(liveStatus(msg.status) || 'Starting…', 'wait');
       break;
     case 'CARD_STATUS':
       if (tl) break;
       ensureCard();
-      if (msg.status === 'error') setStatus(msg.error || 'Something went wrong.', 'err');
+      if (msg.status === 'error') {
+        cpuBuffer = null;
+        caf(bufferRaf);
+        bufferRaf = null;
+        setStatus(msg.error || 'Something went wrong.', 'err');
+      }
       else if (!shown) setStatus(liveStatus(msg.status), 'wait');
+      break;
+    case 'CARD_DEBUG':
+      if (!DEV_MODE) break;
+      if (tl) break;
+      ensureCard();
+      els.debug.textContent = msg.text || '';
+      els.debug.classList.toggle('hidden', !msg.text);
+      if (browserCPU && !shown && msg.text) {
+        setStatus(/^Listening live/i.test(msg.text) ? msg.text : `Listening live · ${msg.text}`, 'wait');
+      }
       break;
     case 'CARD_UPDATE':
       if (!tl && msg.match) showLive(msg.match);
+      break;
+    case 'CARD_HIGHLIGHT':
+      if (!tl && browserCPU && liveMatch) {
+        liveMatch = { ...liveMatch, highlight: msg.highlight };
+        paintCpuHighlight(msg.highlight);
+      }
+      break;
+    case 'CARD_BUFFER':
+      if (tl || !msg.buffer) break;
+      ensureCard();
+      clearTimeout(highlightTimer);
+      caf(liveRaf);
+      liveRaf = null;
+      cpuBuffer = msg.buffer;
+      bufferedWord = -2;
+      if (bufferRaf == null) bufferRaf = raf(bufferTick);
       break;
     case 'CARD_HIDE':
       if (!tl) hideCard();

@@ -69,9 +69,13 @@
           <option value="browser">Browser CPU</option>
         </select>
       </label>
-      <label class="set" id="cpuHighlightSetting" hidden title="Estimated between recognition updates, not precise word timings.">
-        <span>Word highlighting (approximate)</span>
-        <input type="checkbox" class="switch" id="cpuHighlight" />
+      <label class="set" id="cpuLookaheadSetting" hidden title="Automatically use the local download helper when available; otherwise listen live. No GPU model is used.">
+        <span>Auto CPU look-ahead</span>
+        <input type="checkbox" class="switch" id="cpuLookahead" checked />
+      </label>
+      <label class="set" id="cpuHighlightSetting" hidden title="Uses recognized words; look-ahead follows their cached audio timing. Not forced alignment.">
+        <span>Word highlighting (recognized words)</span>
+        <input type="checkbox" class="switch" id="cpuHighlight" checked />
       </label>
       <div class="preview" id="preview" dir="rtl" lang="ar"></div>
       <div class="set">

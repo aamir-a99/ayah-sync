@@ -1,4 +1,5 @@
 /** Popup: start a sync (or live listening) for this tab, and reading settings. */
+const DEV_MODE = import.meta.env.DEV;
 
 const $ = (id) => document.getElementById(id);
 const stages = {
@@ -31,6 +32,7 @@ let state = null;
 let curScript = 'uthmani';
 let curSize = 24;
 let recognition = 'helper';
+let highlightPreference;
 
 // ------------------------------------------------------------------- fonts
 (function fonts() {
@@ -66,9 +68,10 @@ function render() {
   const h = $('helper');
   const local = recognition === 'browser';
   $('cpuHighlightSetting').hidden = !local;
+  $('cpuLookaheadSetting').hidden = !local;
   h.className = `helper ${local ? 'on' : helper == null ? '' : helper.ok ? 'on' : 'off'}`;
-  $('helperText').textContent = local ? 'Local CPU' : helper == null ? 'Checking…' : helper.ok ? 'GPU' : 'CPU';
-  h.title = local ? 'Quran-tiny · CPU' : helper?.ok
+  $('helperText').textContent = local ? 'CPU' : 'GPU';
+  h.title = local ? 'Quran ASR Small · CPU' : helper?.ok
     ? [helper.model, helper.device === 'cuda' ? 'GPU' : helper.device === 'cpu' ? 'CPU' : ''].filter(Boolean).join(' · ')
     : '';
 
@@ -81,13 +84,21 @@ function render() {
 
   if (state.capturing && !(mine && ['working', 'ready'].includes(sync.status))) {
     show('live');
-    $('liveHeading').textContent = 'Listening live';
+    $('liveHeading').textContent = local
+      ? DEV_MODE ? state.debug || 'Starting local recognition…'
+        : state.backend === 'lookahead'
+          ? state.status === 'loading-model' ? 'CPU sync · preparing audio…'
+            : state.lastMatch ? 'Following video · CPU look-ahead' : 'CPU sync · preparing upcoming ayahs…'
+          : state.status === 'loading-model' ? 'Listening live · loading CPU model…'
+            : state.lastMatch ? 'Listening live' : 'Listening live · identifying recitation…'
+      : 'Listening live';
+    $('liveHeading').classList.toggle('debug', local && DEV_MODE);
     const m = state.lastMatch;
     $('liveRef').textContent = m
       ? `${m.surahMeta?.englishName || `Surah ${m.surah}`} ${m.surah}:${m.ayah}`
       : state.status === 'loading-model' ? 'Loading recognition model…' : 'Waiting for recitation…';
     $('liveNote').textContent = local
-      ? ''
+      ? state.backend === 'lookahead' ? 'Audio is downloaded by the helper; this CPU model recognizes ahead of playback.' : ''
       : 'Live recognition is approximate. Sync the video for precise word timing.';
     $('liveNote').title = '';
     if (mine && sync.status === 'error') {
@@ -140,9 +151,9 @@ function render() {
   $('tabTitle').textContent = title;
   const usable = !!tab && /^https?:/.test(tab.url || '');
   $('syncBtn').disabled = !usable;
-  $('syncBtn').textContent = local ? 'Listen live on CPU' : 'Sync verses to this video';
+  $('syncBtn').textContent = local ? $('cpuLookahead').checked ? 'Start CPU sync' : 'Listen live on CPU' : 'Sync verses to this video';
   $('modeNote').textContent = local
-    ? ''
+    ? $('cpuLookahead').checked ? 'Uses CPU look-ahead automatically when the audio helper is available; otherwise listens live.' : ''
     : 'One pass over the audio, then every word follows the video — pause, rewind and replay freely.';
   $('liveBtn').hidden = !usable || local;
   const err = (mine && sync.status === 'error' && sync.error) || state.error || (!usable && 'Open a page with a video to begin.');
@@ -193,7 +204,17 @@ async function checkHelper() {
   render();
 }
 
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  if (msg?.type === 'CAPTURE_TOKEN') {
+    // With COOP/COEP, a token issued in the service worker belongs to the
+    // wrong renderer. Issue it in an isolated extension page instead, like
+    // the offscreen document which will consume it.
+    chrome.tabCapture.getMediaStreamId({ targetTabId: msg.tabId }).then(
+      (streamId) => reply({ streamId }),
+      (error) => reply({ error: error.message || String(error) }),
+    );
+    return true;
+  }
   if (msg?.type === 'STATE') {
     state = msg.state;
     render();
@@ -214,8 +235,10 @@ $('retryBtn').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------- settings
-chrome.storage.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltAmbient', 'qltLang', 'qltRecognition', 'qltCPUHighlight'], (v) => {
-  $('cpuHighlight').checked = v?.qltCPUHighlight === true;
+chrome.storage.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltAmbient', 'qltLang', 'qltRecognition', 'qltCPUHighlight', 'qltCPULookahead'], (v) => {
+  $('cpuLookahead').checked = v?.qltCPULookahead !== false;
+  highlightPreference = v?.qltCPUHighlight;
+  $('cpuHighlight').checked = highlightPreference ?? (v?.qltCPULookahead !== false);
   recognition = v?.qltRecognition || 'helper';
   $('recognition').value = recognition;
   $('ambient').checked = v?.qltAmbient !== false;
@@ -233,7 +256,16 @@ $('recognition').addEventListener('change', async (e) => {
   render();
 });
 $('showTrans').addEventListener('change', (e) => chrome.storage.local.set({ showTranslation: e.target.checked }));
-$('cpuHighlight').addEventListener('change', (e) => chrome.storage.local.set({ qltCPUHighlight: e.target.checked }));
+$('cpuHighlight').addEventListener('change', (e) => {
+  highlightPreference = e.target.checked;
+  chrome.storage.local.set({ qltCPUHighlight: highlightPreference });
+});
+$('cpuLookahead').addEventListener('change', async (e) => {
+  await chrome.storage.local.set({ qltCPULookahead: e.target.checked });
+  if (highlightPreference == null) $('cpuHighlight').checked = e.target.checked;
+  if (state?.capturing) await send('STOP');
+  render();
+});
 $('lang').addEventListener('change', (e) => chrome.storage.local.set({ qltLang: e.target.value }));
 $('ambient').addEventListener('change', (e) => chrome.storage.local.set({ qltAmbient: e.target.checked }));
 $('scriptSeg').addEventListener('click', (e) => {

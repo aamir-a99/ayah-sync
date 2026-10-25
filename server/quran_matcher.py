@@ -1,5 +1,5 @@
 """
-Quran fuzzy matcher (Python port of src/matcher/match.js).
+Quran fuzzy matcher (Python port of src/cpu/match.js).
 
 Given a noisy Arabic transcript, finds the ayah most likely being recited *now*
 via trigram-alignment voting, and the current word index within that ayah for

@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { QuranMatcher, normalizeArabic } from '../src/matcher/match.js';
-import { AudioWindow } from '../src/offscreen/audio-window.js';
+import { QuranMatcher, normalizeArabic } from '../src/cpu/match.js';
+import { AudioWindow } from '../src/cpu/audio-window.js';
 import './test-local-tracking.mjs';
 import './test-cpu-live.mjs';
+import './test-cpu-words.mjs';
+import './test-audio-features.mjs';
+import './test-live-routing.mjs';
+import './test-lookahead-buffer.mjs';
+import './test-startup-buffer.mjs';
+import './test-ctc-alignment.mjs';
 
 const data = (name) => JSON.parse(readFileSync(new URL(`../src/data/${name}.json`, import.meta.url)));
 const arabic = data('quran-uthmani');

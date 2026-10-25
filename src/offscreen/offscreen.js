@@ -1,7 +1,8 @@
 /** Tab capture, with browser-only CPU inference or the optional Python helper. */
-import { AudioWindow } from './audio-window.js';
-import { RecognitionScheduler } from './recognition-scheduler.js';
-import { recognitionCooldown } from './live-pacing.js';
+import { AudioWindow } from '../cpu/audio-window.js';
+import { RecognitionScheduler } from '../cpu/recognition-scheduler.js';
+import { recognitionCooldown } from '../cpu/live-pacing.js';
+const DEV_MODE = import.meta.env.DEV;
 
 const SERVER_URL = 'ws://127.0.0.1:8790';
 const SAMPLE_RATE = 16000; // must match the server
@@ -20,13 +21,17 @@ let recognitionTimer = null;
 let modelLoadTimer = null;
 let inferenceTimer = null;
 let backend = 'helper';
+let lookahead = null;
+let modelThreads = 1;
 let busy = false;
 let ready = false;
 let generation = 0;
 let captureSession = 0;
-let inFlightClock = null;
+let captureEpoch = 0;
+let inFlightEpoch = 0;
+let clockPending = false;
+let inFlightAt = 0;
 let lastClock = null;
-let mediaPlaying = true;
 let nextInferenceAt = 0;
 const windowAudio = new AudioWindow(SAMPLE_RATE * 10);
 const scheduler = new RecognitionScheduler(SAMPLE_RATE);
@@ -35,14 +40,14 @@ function resetRecognition(keepContext = false) {
   generation++;
   nextInferenceAt = 0;
   windowAudio.reset();
-  scheduler.reset(keepContext && scheduler.locked);
+  scheduler.reset();
   recognitionWorker?.postMessage({ type: 'reset', keepContext });
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'reset' }));
 }
 
-function connectBrowser() {
-  debug('Loading CPU model…');
-  recognitionWorker = new Worker(new URL('./recognition-worker.js', import.meta.url), { type: 'module' });
+function connectBrowser(maxThreads = 4) {
+  debug('Listening live · loading CPU model…');
+  recognitionWorker = new Worker(new URL('../cpu/recognition-worker.js', import.meta.url), { type: 'module' });
   const fail = (error) => {
     stopCapture();
     send({ type: 'ERROR', error: `Browser recognition failed: ${error}` });
@@ -55,55 +60,70 @@ function connectBrowser() {
       clearTimeout(modelLoadTimer);
       modelLoadTimer = null;
       ready = true;
+      modelThreads = data.threads || 1;
       send({ type: 'STATUS', status: 'listening' });
-      debug(`Listening on CPU · ${data.threads || 1} WASM thread(s).`);
+      debug(`Listening live · buffering audio · Quran ASR Small · ${modelThreads} thread(s) · 4s window / 0.5s hop`);
     } else if (data.type === 'progress') {
       send({ type: 'MODEL_PROGRESS', progress: data });
     } else if (data.type === 'error') {
-      fail(data.error);
+      if (data.initializing && maxThreads > 1) {
+        // Retry in a fresh worker: an initialized ORT runtime cannot safely
+        // change its thread pool in place. Never interrupt the captured stream.
+        clearTimeout(modelLoadTimer);
+        clearInterval(recognitionTimer);
+        recognitionWorker.terminate();
+        debug('Threaded CPU initialization failed — retrying with one thread…');
+        connectBrowser(1);
+      } else fail(data.error);
     } else if (data.type === 'result') {
       clearTimeout(inferenceTimer);
       inferenceTimer = null;
-      const clock = inFlightClock;
-      inFlightClock = null;
       busy = false;
-      nextInferenceAt = performance.now() + recognitionCooldown(data.ms);
-      if (data.generation !== generation) return;
-      scheduler.update(data.tracking);
-      debug(`CPU: ${data.ms} ms · ${data.tracking?.phase || 'identifying'} · ${data.match?.ref || 'awaiting confirmation'}`);
-      if (data.match) send({ type: 'RESULT', match: data.match, clock });
+      if (data.generation !== generation) {
+        nextInferenceAt = 0;
+        return;
+      }
+      scheduler.updateTracking(data.tracking, data.ms, modelThreads);
+      nextInferenceAt = performance.now() + recognitionCooldown(data.ms, scheduler.responsive);
+      const heard = (data.text || '').replace(/\s+/g, ' ').slice(0, 32);
+      debug(`ASR ${modelThreads}t · ${data.ms}ms · ${data.tracking?.phase || 'identifying'} · ${data.match?.ref || heard || 'no text'}`);
+      const highlight = data.highlight ? { ...data.highlight,
+        expiresAt: inFlightAt + 1000 - data.highlight.ageMs } : null;
+      if (data.match) send({ type: 'RESULT', match: data.match, highlight, captureEpoch: inFlightEpoch });
+      else send({ type: 'HIGHLIGHT', highlight, captureEpoch: inFlightEpoch });
     }
   };
-  recognitionWorker.postMessage({ type: 'init', baseURL: chrome.runtime.getURL('') });
+  recognitionWorker.postMessage({ type: 'init', baseURL: chrome.runtime.getURL(''), maxThreads });
   recognitionTimer = setInterval(() => {
     if (!running || !ready || busy || performance.now() < nextInferenceAt) return;
-    const reason = mediaPlaying ? scheduler.due() : null;
+    const reason = scheduler.due();
     if (!reason) return;
-    const pauseTail = reason === 'speech-pause' ? scheduler.pauseTail() : 0;
-    const audio = windowAudio.snapshot(scheduler.windowSamples(reason), pauseTail);
+    const audio = windowAudio.snapshot(scheduler.windowSamples());
+    const freshSeconds = scheduler.freshSeconds();
+    inFlightAt = Date.now();
+    inFlightEpoch = captureEpoch;
     scheduler.submittedNow();
     busy = true;
-    const submittedGeneration = generation;
-    // Stamp the end of captured audio BEFORE ASR, not when inference completes.
-    captureClock().then((clock) => {
-      if (!running || submittedGeneration !== generation || clock?.seeking || clock?.paused) {
-        busy = false;
-        return;
-      }
-      if (clock && lastClock && (clock.key !== lastClock.key || Math.abs(clock.duration - lastClock.duration) > 2)) {
-        lastClock = clock;
-        resetRecognition();
-        busy = false;
-        return;
-      }
-      if (clock) lastClock = clock;
-      inFlightClock = clock && pauseTail
-        ? { ...clock, time: Math.max(0, clock.time - pauseTail / SAMPLE_RATE * (clock.playbackRate || 1)) }
-        : clock;
-      armInferenceTimeout();
-      recognitionWorker.postMessage({ type: 'audio', audio, generation }, [audio.buffer]);
-    });
-  }, 250); // Check cheaply; submit at most once per second, only when idle.
+    debug(`ASR ${modelThreads}t · processing ${(audio.length / SAMPLE_RATE).toFixed(1)}s audio`);
+    // Do not wait up to 1.5 seconds for a busy page before recognizing audio.
+    // Explicit capture epochs reject pre-seek results independently of clocks.
+    pollCaptureClock();
+    armInferenceTimeout();
+    recognitionWorker.postMessage({ type: 'audio', audio, generation, freshSeconds }, [audio.buffer]);
+  }, 50); // Cheap checks; audio samples and measured CPU speed set the cadence.
+}
+
+function pollCaptureClock() {
+  if (clockPending) return;
+  clockPending = true;
+  const submittedGeneration = generation;
+  const session = captureSession;
+  captureClock().then((clock) => {
+    if (!running || session !== captureSession || submittedGeneration !== generation || !clock) return;
+    const changed = lastClock && (clock.key !== lastClock.key || Math.abs(clock.duration - lastClock.duration) > 2);
+    lastClock = clock;
+    if (changed || clock.seeking) resetRecognition();
+  }).finally(() => { clockPending = false; });
 }
 
 function armInferenceTimeout() {
@@ -121,7 +141,7 @@ function send(msg) {
   chrome.runtime.sendMessage(msg).catch(() => {});
 }
 function debug(text) {
-  console.log('[qlt]', text);
+  if (DEV_MODE) console.log('[qlt]', text);
   send({ type: 'DEBUG', text });
 }
 // A slow tab or asleep service worker must not leave recognition stuck on `busy`.
@@ -160,6 +180,10 @@ function connectServer() {
       return;
     }
     if (d.type === 'ready') {
+      if (d.capabilities?.live === false) {
+        send({ type: 'ERROR', error: 'The audio-only helper supports Browser CPU look-ahead. Start server.py for GPU live recognition.' });
+        return;
+      }
       send({ type: 'STATUS', status: 'listening' });
       debug('Server ready — listening for recitation.');
     } else if (d.type === 'result' && d.match) {
@@ -175,13 +199,13 @@ function connectServer() {
 }
 
 // --- Capture ----------------------------------------------------------------
-async function startCapture(streamId, mode = 'helper') {
+async function startCapture(streamId, mode = 'helper', epoch = 0) {
   if (running) return;
   running = true;
   const session = ++captureSession;
   backend = mode;
+  captureEpoch = epoch;
   lastClock = null;
-  mediaPlaying = true;
   resetRecognition();
   send({ type: 'STATUS', status: 'loading-model' });
   playback = document.getElementById('playback');
@@ -226,10 +250,8 @@ async function startCapture(streamId, mode = 'helper') {
     if (!running) return;
     framesSeen++;
     if (backend === 'browser') {
-      if (mediaPlaying) {
-        windowAudio.push(e.data);
-        scheduler.push(e.data);
-      }
+      windowAudio.push(e.data);
+      scheduler.push(e.data);
     } else if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(e.data.buffer); // Float32 PCM, transferred from the worklet
     }
@@ -262,6 +284,8 @@ async function startCapture(streamId, mode = 'helper') {
 }
 
 function stopCapture() {
+  lookahead?.stop();
+  lookahead = null;
   running = false;
   captureSession++;
   clearTimeout(modelLoadTimer);
@@ -274,7 +298,6 @@ function stopCapture() {
   recognitionWorker?.terminate();
   recognitionWorker = null;
   ready = busy = false;
-  inFlightClock = null;
   windowAudio.reset();
   clearInterval(heartbeat);
   heartbeat = null;
@@ -300,9 +323,24 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== 'offscreen') return;
   switch (msg.type) {
     case 'START_CAPTURE':
-      startCapture(msg.streamId, msg.backend).catch((err) => {
+      startCapture(msg.streamId, msg.backend, msg.captureEpoch).catch((err) => {
         stopCapture();
         send({ type: 'ERROR', error: err.message || String(err) });
+      });
+      sendResponse?.({ ok: true });
+      break;
+    case 'START_LOOKAHEAD':
+      (async () => {
+        if (running) return;
+        running = true;
+        backend = 'lookahead';
+        const session = ++captureSession;
+        const { startLookahead } = await import('../cpu/lookahead.js');
+        if (!running || session !== captureSession) return;
+        lookahead = startLookahead(msg, send);
+      })().catch((error) => {
+        stopCapture();
+        send({ type: 'ERROR', error: error.message || String(error) });
       });
       sendResponse?.({ ok: true });
       break;
@@ -310,13 +348,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       stopCapture();
       sendResponse?.({ ok: true });
       break;
-    case 'RESET_CAPTURE':
-      resetRecognition();
+    case 'CPU_HIGHLIGHT_SETTING':
+      lookahead?.setHighlight(msg.enabled);
       sendResponse?.({ ok: true });
       break;
-    case 'MEDIA_PLAYING':
-      if (mediaPlaying !== msg.playing) resetRecognition(true);
-      mediaPlaying = msg.playing;
+    case 'RESET_CAPTURE':
+      if (lookahead) {
+        lookahead.reset(msg.captureEpoch);
+        sendResponse?.({ ok: true });
+        break;
+      }
+      if (msg.captureEpoch != null) captureEpoch = msg.captureEpoch;
+      resetRecognition();
       sendResponse?.({ ok: true });
       break;
   }

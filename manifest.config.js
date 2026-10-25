@@ -6,7 +6,7 @@ export default defineManifest({
   name: 'Ayah Sync',
   version: pkg.version,
   description:
-    'Follows Quran recitation videos word by word and shows the translation. Needs the Ayah Sync helper running on your computer.',
+    'Follows Quran recitation videos with translations using browser CPU recognition or the local GPU helper.',
   icons: {
     16: 'icons/icon16.png',
     48: 'icons/icon48.png',
@@ -21,10 +21,15 @@ export default defineManifest({
     type: 'module',
   },
   permissions: ['tabCapture', 'activeTab', 'offscreen', 'storage', 'scripting'],
+  host_permissions: ['http://127.0.0.1:8790/*'],
+  // Shared-memory WASM threads require both policies. Capture tokens must be
+  // issued by the popup (not the service worker); see CAPTURE_TOKEN routing.
+  cross_origin_opener_policy: { value: 'same-origin' },
+  cross_origin_embedder_policy: { value: 'require-corp' },
   // Browser recognition is bundled; downloads use the loopback Python helper.
   content_security_policy: {
     extension_pages:
-      "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; connect-src 'self' ws://127.0.0.1:8790 ws://localhost:8790",
+      "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; connect-src 'self' http://127.0.0.1:8790 ws://127.0.0.1:8790 ws://localhost:8790",
   },
   content_scripts: [
     {

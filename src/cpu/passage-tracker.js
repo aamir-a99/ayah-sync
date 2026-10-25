@@ -1,4 +1,5 @@
-// A passage must be confirmed before UI updates; pauses never advance a verse.
+// CPU browser tracker only (not the original Python GPU matcher). A passage
+// must be confirmed before UI updates; pauses never advance a verse.
 export class PassageTracker {
   constructor(matcher) {
     this.matcher = matcher;
@@ -33,14 +34,22 @@ export class PassageTracker {
     return match;
   }
 
-  update(text) {
+  update(text, observationWeight = 1) {
+    // Rolling CTC windows often contain silence or an unfinished word at an
+    // ayah boundary. That is no evidence of a different passage. In particular,
+    // do not erase the basmala context while waiting for the next phrase.
+    const words = (text || '').trim().split(/\s+/).filter(Boolean);
+    if (words.length < 2) return null;
     if (this.locked) {
       const candidate = this.matcher.match(text, this.anchor, {
         localOnly: true, nearbyRefs: this.matcher.nearbyRefs(this.anchor), evidenceOnly: true,
       });
       if (candidate && candidate.score >= 0.35 && candidate.evidenceWords >= 2) {
+        // The overlapping window can still contain the previous verse. Never
+        // move the card backwards on that stale audio; seeking resets context.
+        if (candidate.ref !== this.current?.ref && candidate.pos < this.anchor) return null;
         if (candidate.ref !== this.current?.ref &&
-            candidate.refEvidenceWords < Math.min(3, candidate.refWordCount)) {
+          candidate.refEvidenceWords < Math.min(2, candidate.refWordCount)) {
           // A strong previous ayah plus one new token is not enough evidence
           // to switch. Count support in the proposed NEW ayah, not the window.
           return null;
@@ -48,12 +57,14 @@ export class PassageTracker {
         return this.accept(candidate);
       }
       // A single breath/noisy window must not send us to a different surah.
-      if (++this.misses < 2) return null;
+      // Half-second hops are highly correlated, not independent failures.
+      // Short partial phrases must not force global re-identification either.
+      if (words.length < 3 || (this.misses += observationWeight) < 6) return null;
       this.reset();
     }
     let candidate = this.matcher.match(text, null, { evidenceOnly: true });
     if (!candidate || candidate.score < 0.6 || candidate.evidenceWords < 3) {
-      if (++this.misses >= 2) {
+      if (words.length >= 3 && (this.misses += observationWeight) >= 6) {
         this.pending = null;
         this.confirmations = 0;
       }

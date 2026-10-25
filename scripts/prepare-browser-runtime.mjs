@@ -1,4 +1,4 @@
-// Copy the EXACT runtime version used by Transformers.js; never fetch JS/WASM
+// CPU browser runtime: copy the EXACT pinned ONNX Runtime version; never fetch JS/WASM
 // from a CDN at inference time (MV3 CSP forbids remote executable code).
 import { mkdir, readdir, copyFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';

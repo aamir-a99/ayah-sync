@@ -1,7 +1,7 @@
 {
   "name": "ayah-sync",
   "version": "0.1.1",
-  "description": "Follows Quran recitation videos word by word and shows the translation. Needs the Ayah Sync helper running on your computer.",
+  "description": "Follows Quran recitation videos with translations using browser CPU recognition or the local GPU helper.",
   "type": "module",
   "scripts": {
     "fetch-data": "node scripts/fetch-quran-data.mjs",
@@ -11,6 +11,8 @@
     "prepare-browser-runtime": "node scripts/prepare-browser-runtime.mjs",
     "test:local": "node scripts/test-local-matcher.mjs",
     "test:capture": "node scripts/test-local-capture.mjs",
+    "test:threads": "node scripts/test-cpu-threads.mjs",
+    "test:lookahead": "node scripts/test-cpu-lookahead.mjs",
     "build": "npm run prepare-browser-runtime && vite build",
     "preview": "vite preview"
   },
@@ -20,6 +22,6 @@
     "vite": "^5.4.10"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.3.1"
+    "onnxruntime-web": "1.31.0-dev.20260914-8d85527a0"
   }
 }

@@ -20,6 +20,21 @@ step.
 hand and run a small helper program on your own computer. See
 [Known limits](#known-limits).
 
+### Quick start on CPU
+
+1. Load the extension in Chrome and open a recitation video.
+2. Select **Recognition → Browser CPU**, then **Start CPU sync**.
+3. For look-ahead sync, install Python and FFmpeg, then run:
+   ```bash
+   python -m pip install -r server/requirements-audio.txt
+   python server/audio_server.py
+   ```
+   Keep **Auto CPU look-ahead** enabled; sync waits for 12 seconds of prepared
+   audio before displaying ayahs. Without the helper, CPU mode listens live.
+
+No NVIDIA GPU is required. See [Browser CPU option](#browser-cpu-option-experimental)
+for details.
+
 ## What you need
 
 - Windows 10/11 (macOS and Linux should work but are untested)
@@ -137,56 +152,37 @@ ordinary browser tab for testing.
 
 ### Browser CPU option (experimental)
 
-Select **Recognition → Browser CPU**, then **Listen live on CPU**. The bundled
-quantized `tarteel-ai/whisper-tiny-ar-quran` model recognises the playing tab
-locally through WASM. No Python helper, media download, audio upload, batch
-scan, stored timeline or seek markers are used. The helper remains the default
-mode and retains its full-video alignment and navigation.
+Select **Recognition → Browser CPU**, then **Start CPU sync**. The bundled int8
+[Abdou/quran-asr-small on Hugging Face](https://huggingface.co/Abdou/quran-asr-small)
+model runs locally in the browser—no NVIDIA GPU or audio upload required.
 
-CPU mode shows only confirmed live ayahs and translations. Initial identification
-needs at least six seconds of speech and passage confirmation. It keeps a rolling
-audio window, runs one inference at a time and leaves 2–5 seconds of idle time
-after each call (longer on slower CPUs). Old work never builds up in a queue.
-Silence and paused playback do not repeatedly run recognition.
-Detected speech pauses trigger a recognition attempt on the preceding speech,
-with trailing silence trimmed and a short reverb tail retained. A pause alone
-never advances the ayah; a text match is still required. Once a passage is
-confirmed, fresh speech after a breath is checked using roughly 2.5–6 seconds
-from the new phrase, rather than including the old ayah. Recently checked
-phrases are not immediately recognised again at the next pause. Continuous
-speech is checked every eight seconds (four near an ayah end), with the CPU
-cooldown still enforced. Shorter inputs reduce repeated transcription, but do
-not guarantee faster WASM inference because Whisper pads its encoder input.
-Seeking clears
-the old passage; the new position must be recognised again. Ayah changes may
-lag or be missed, particularly on slow or busy devices; average-CPU performance
-is not guaranteed. The recogniser uses a single WASM thread.
+- **Auto CPU look-ahead:** uses an available helper to download audio, then
+  recognizes 12 seconds ahead. It waits for the initial buffer before displaying
+  ayahs and follows playback through pauses and seeks. Helper setup is in
+  [Quick start on CPU](#quick-start-on-cpu); only one helper can use port 8790.
+- **Live-only:** works without Python. Disable Auto CPU look-ahead to force it;
+  it is also the fallback when no compatible helper is available.
+- **Word highlighting:** defaults on with look-ahead, off otherwise; saved
+  preferences take priority. Timing is best-effort, not guaranteed exact.
+- **Next video:** click **Sync this video** on the card to restart CPU sync.
 
-Word highlighting is optional and off by default. If enabled it is a live
-estimate, not forced-aligned word timing. CPU mode has no sync/loading timeline
-or previous/next/repeat navigation. The card follows the active tab just as in
-the existing live mode.
+CPU mode uses up to four WASM threads with a single-thread fallback. Performance
+varies by device; GPU recognition and full-video alignment remain separate.
 
-To include the CPU model in a build, export it once before `npm run build`:
+For source builds, download the CPU model before building:
 
 ```bash
-python -m pip install 'optimum-onnx[onnxruntime]' 'transformers<5'
 python scripts/export-browser-model.py
+npm run build
 ```
 
-The export downloads the model weights; runtime inference uses bundled files
-and does not upload audio. Generated model files are not committed.
-Run `npm run test:local` for unit tests. After exporting and building,
-`BROWSER_PATH=/path/to/chrome npm run test:capture` tests tab capture, recognition
-pause/seek recovery and absence of helper requests or CPU timelines; it downloads
-a short test recording if needed.
-On Linux, `bash scripts/run-browser-local.sh` opens an isolated Brave/Chrome
-profile with the extension loaded, GPU disabled and no CPU throttling.
+Tests: `npm run test:local`, `npm run test:capture`, `npm run test:threads`, and
+`npm run test:lookahead` (requires Python/FFmpeg and a free port 8790).
 
 ## Credits
 
-- Browser speech model: [Tarteel Whisper Tiny Arabic Quran](https://huggingface.co/tarteel-ai/whisper-tiny-ar-quran)
-  (Apache-2.0), exported to quantized ONNX and run with Transformers.js.
+- Browser speech model: [Abdou/quran-asr-small](https://huggingface.co/Abdou/quran-asr-small)
+  (MIT), an int8 Zipformer CTC model run locally through ONNX Runtime Web.
 - Quran text and translations: [Al-Quran Cloud](https://alquran.cloud) and
   [quran.com](https://quran.com). Translators: Saheeh International (English),
   Fateh Muhammad Jalandhry (Urdu), Indonesian Ministry of Religious Affairs,
