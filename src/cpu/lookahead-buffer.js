@@ -22,14 +22,31 @@ export function alignTimedWords(words, ayah) {
   return pairs.reverse();
 }
 
-// Small rolling timing buffer, not a whole-video recognition job. Only verses
-// accepted by the unchanged passage tracker are eligible for timed display.
+// Timing buffer, not a whole-video recognition job. Only verses
+// supported by a confirmed passage are eligible for timed display.
 export class LookaheadBuffer {
-  constructor() { this.reset(); }
-  reset() { this.cues = []; this.history = []; this.from = this.until = null; this.observations = new WeakMap(); }
+  constructor({ retainCues = false } = {}) { this.retainCues = retainCues; this.reset(); }
+  reset() {
+    this.cues = []; this.history = []; this.from = this.until = null;
+    this.observations = new WeakMap(); this.observationFloor = 0;
+  }
+  indexAt(time) {
+    let lo = 0, hi = this.cues.length - 1, index = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.cues[mid].t0 <= time) { index = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return index;
+  }
   applyAlignments(windows) {
+    const updated = new Set([this.cues.length - 2, this.cues.length - 1]);
     for (const window of windows || []) {
-      for (const cue of this.cues.filter((c) => c.match.ref === window.ref)) {
+      for (let i = Math.max(0, this.indexAt(window.start));
+           i < this.cues.length && this.cues[i].t0 < window.start + window.duration; i++) {
+        const cue = this.cues[i];
+        if (cue.match.ref !== window.ref || window.start + window.duration <= cue.t0 ||
+            window.start >= (this.cues[i + 1]?.t0 ?? this.until)) continue;
         let observations = this.observations.get(cue);
         if (!observations) { observations = new Map(); this.observations.set(cue, observations); }
         for (const span of window.spans) {
@@ -61,9 +78,14 @@ export class LookaheadBuffer {
         // Never overlap two highlights or extrapolate through a missing word.
         for (let i = 0; i < words.length - 1; i++) words[i].end = Math.min(words[i].end, words[i + 1].start);
         cue.highlightWords = words.filter((w) => w.end > w.start);
+        updated.add(i);
       }
     }
-    for (let i = 0; i < this.cues.length; i++) {
+    this.trimHighlights(updated);
+  }
+  trimHighlights(indices = this.cues.keys()) {
+    for (const i of indices) {
+      if (i < 0 || i >= this.cues.length) continue;
       const cue = this.cues[i], until = this.cues[i + 1]?.t0 ?? this.until;
       if (cue.highlightWords) cue.highlightWords = cue.highlightWords.map((w) => ({ ...w, end: Math.min(w.end, until) }))
         .filter((w) => w.end > w.start);
@@ -74,17 +96,55 @@ export class LookaheadBuffer {
     this.until = start + duration;
     this.history.push({ start, words: result.timedWords || [] });
     this.history = this.history.filter((w) => w.start >= start - 8);
-    const match = result.timingMatch;
-    if (!match) return;
+    if (Array.isArray(result.timingMatches)) {
+      // The recognizer assigns every supported token to its actual ayah in
+      // the accepted passage, including multiple short ayahs in one window.
+      // Do not reassign a repeated phrase from another ayah via per-verse LCS.
+      const groups = new Map();
+      for (const { match, spans } of result.timingMatches) {
+        const group = groups.get(match.ref) || { match, spans: [] };
+        group.spans.push(...spans);
+        groups.set(match.ref, group);
+      }
+      for (const { match, spans } of [...groups.values()].sort((a, b) => a.match.pos - b.match.pos)) {
+        this.addMatch(match, spans);
+      }
+    } else if (result.timingMatch) {
+      const match = result.timingMatch;
+      const candidates = this.history.flatMap((window) => {
+        const pairs = alignTimedWords(window.words, match).map((w) => ({ ...w,
+          start: w.start + window.start, end: w.end + window.start }));
+        return pairs.length >= Math.min(2, match.wordCount) ? pairs : [];
+      });
+      this.addMatch(match, candidates);
+    }
+    // CPU look-ahead retains compact verse/word timings for session replay;
+    // raw transcript history and PCM remain bounded independently.
+    if (!this.retainCues) {
+      while (this.cues.length > 1 && this.cues[1].t0 < playhead - 30) this.cues.shift();
+    } else {
+      // Match the original live buffer's retention boundary. Keep final word
+      // timings for replay without dropping their consensus while still live.
+      while (this.observationFloor < this.cues.length - 1 && this.cues[this.observationFloor + 1].t0 < playhead - 30) {
+        this.observations.delete(this.cues[this.observationFloor++]);
+      }
+    }
+  }
+  addMatch(match, spans) {
     let cue = this.cues.at(-1);
+    if (cue && match.pos < cue.match.pos && match.ref !== cue.match.ref) return;
     const continuing = cue?.match.ref === match.ref;
-    const lower = continuing ? cue.lower : cue?.lastEnd ?? this.from;
-    const candidates = this.history.flatMap((window) => {
-      const pairs = alignTimedWords(window.words, match).map((w) => ({ ...w,
-        start: w.start + window.start, end: w.end + window.start }));
-      return pairs.length >= Math.min(2, match.wordCount) ? pairs.filter((w) => w.start >= lower) : [];
-    });
-    if (candidates.length < Math.min(2, match.wordCount)) return;
+    // Greedy CTC may sustain the last character until the window's end. Its
+    // end is not an admission boundary for the next ayah. Ordered, supported
+    // word ONSETS are; valid new words may start before that stale end.
+    const lower = continuing ? cue.lower : cue ? Math.max(...cue.words.map((w) => w.start)) + 0.001 : this.from;
+    // Admission uses actual recognized-token ownership. An earlier acoustic
+    // onset must not discard the first word and lose a short ayah. If it would
+    // cross the previous ayah's last known word, keep the raw onset instead.
+    const candidates = spans.filter((w) => Number.isFinite(w.start) && Number.isFinite(w.end) && w.end > w.start &&
+      (w.rawStart ?? w.start) >= lower).map((w) => ({ ...w, start: w.start < lower ? w.rawStart : w.start }));
+    const wordCount = match.arabic.trim().split(/\s+/).filter((w) => normalizeArabic(w)).length;
+    if (new Set(candidates.map((w) => w.word)).size < Math.min(2, wordCount)) return;
     if (!continuing) {
       cue = { match, lower, t0: Math.min(...candidates.map((w) => w.start)), words: [], lastEnd: lower };
       this.cues.push(cue);
@@ -100,9 +160,20 @@ export class LookaheadBuffer {
     cue.words.sort((a, b) => a.start - b.start);
     cue.t0 = Math.max(cue.lower, Math.min(cue.t0, cue.words[0].start));
     cue.lastEnd = Math.max(...cue.words.map((w) => w.end));
-    // Retain a short seek-back buffer. PCM itself is cached separately in one
-    // bounded block; long videos cannot accumulate unbounded tab/session data.
-    while (this.cues.length > 1 && this.cues[1].t0 < playhead - 30) this.cues.shift();
+    if (!continuing && this.cues.length > 1) {
+      const previous = this.cues.at(-2);
+      previous.words = previous.words.map((w) => ({ ...w, end: Math.min(w.end, cue.t0) }));
+      previous.lastEnd = Math.min(previous.lastEnd, cue.t0);
+      this.trimHighlights([this.cues.length - 2]);
+    }
   }
-  payload() { return { from: this.from, until: this.until, cues: this.cues }; }
+  payload(playhead = null) {
+    if (playhead === null) return { from: this.from, until: this.until, cues: this.cues };
+    // Preserve the full recognition cache here, not in every IPC/storage write.
+    const cueFrom = Math.max(this.from ?? playhead, playhead - 30);
+    const cueUntil = Math.min(this.until ?? playhead, playhead + 24);
+    const from = Math.max(0, this.indexAt(cueFrom));
+    const until = this.indexAt(cueUntil) + 1;
+    return { from: this.from, until: this.until, cueFrom, cueUntil, cues: this.cues.slice(from, until) };
+  }
 }

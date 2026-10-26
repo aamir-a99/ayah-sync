@@ -4,6 +4,7 @@ import { decodeCtc, wordHighlight } from './ctc-words.js';
 import { alignCtcWords, speechEnvelope, stitchCtcWindows } from './ctc-alignment.js';
 import { QuranMatcher } from './match.js';
 import { PassageTracker } from './passage-tracker.js';
+import { passageTimings } from './passage-timings.js';
 import arabic from '../data/quran-uthmani.json';
 import english from '../data/quran-en.json';
 import surahs from '../data/surahs.json';
@@ -81,17 +82,20 @@ export async function createRecognizer(baseURL, progress = () => {}, maxThreads 
       }
       // Faster overlapping observations are correlated. Do not let them erase
       // passage context twice as quickly as the normal half-second cadence.
-      const match = passage.update(text, Math.min(1, Math.max(0, freshSeconds) / 0.5));
+      const envelope = timings ? speechEnvelope(normalized) : null;
+      const match = passage.update(text, Math.min(1, Math.max(0, freshSeconds) / 0.5),
+        timings ? { start: options.audioStart || 0, words, envelope } : null);
       const highlight = wordHighlight(words, passage.current, duration);
       const timingStart = performance.now();
       if (timings) {
         const window = { start: options.audioStart || 0, words, duration, frames: outputFrames,
-          logProbs: result.log_probs.data.slice(), envelope: speechEnvelope(normalized) };
+          logProbs: result.log_probs.data.slice(), envelope };
         timingCache.push(window);
         if (timingCache.length > 24) timingCache.shift();
       }
       return { match, text, highlight, ms: Math.round(performance.now() - start), tracking: passage.state(),
         ...(timings ? { timedWords: words, timingMatch: passage.locked ? passage.current : null,
+          timingMatches: passageTimings(passage.timingMatches),
           timingMs: performance.now() - timingStart } : {}) };
     },
   };

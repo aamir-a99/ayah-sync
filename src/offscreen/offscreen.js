@@ -199,7 +199,7 @@ function connectServer() {
 }
 
 // --- Capture ----------------------------------------------------------------
-async function startCapture(streamId, mode = 'helper', epoch = 0) {
+async function startCapture(streamId, mode = 'helper', epoch = 0, reservedStream = null) {
   if (running) return;
   running = true;
   const session = ++captureSession;
@@ -211,7 +211,7 @@ async function startCapture(streamId, mode = 'helper', epoch = 0) {
   playback = document.getElementById('playback');
 
   try {
-    const captured = await navigator.mediaDevices.getUserMedia({
+    const captured = reservedStream || await navigator.mediaDevices.getUserMedia({
       audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
       video: false,
     });
@@ -284,7 +284,7 @@ async function startCapture(streamId, mode = 'helper', epoch = 0) {
 }
 
 function stopCapture() {
-  lookahead?.stop();
+  const cleanup = lookahead?.stop();
   lookahead = null;
   running = false;
   captureSession++;
@@ -316,6 +316,7 @@ function stopCapture() {
   if (playback) playback.srcObject = null;
   audioContext = mediaStream = sourceNode = workletNode = null;
   send({ type: 'STATUS', status: 'stopped' });
+  return cleanup;
 }
 
 // --- Message routing --------------------------------------------------------
@@ -334,10 +335,44 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (running) return;
         running = true;
         backend = 'lookahead';
+        captureEpoch = msg.captureEpoch;
         const session = ++captureSession;
+        if (msg.streamId) {
+          try {
+            const captured = await navigator.mediaDevices.getUserMedia({
+              audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: msg.streamId } }, video: false,
+            });
+            if (!running || session !== captureSession) { captured.getTracks().forEach((t) => t.stop()); return; }
+            mediaStream = captured;
+            playback = document.getElementById('playback');
+            playback.srcObject = captured;
+            playback.play().catch(() => {});
+          } catch {} // Browser downloading itself does not require tab capture.
+        }
         const { startLookahead } = await import('../cpu/lookahead.js');
         if (!running || session !== captureSession) return;
-        lookahead = startLookahead(msg, send);
+        const fallback = async () => {
+          if (!running || session !== captureSession) return;
+          const result = await chrome.runtime.sendMessage({ type: 'CPU_LIVE_FALLBACK', hasStream: !!mediaStream?.active });
+          if (!running || session !== captureSession || result?.cancelled) return;
+          if (!result?.ok) {
+            stopCapture();
+            send({ type: 'ERROR', error: result?.error || 'Could not start CPU live listening.' });
+            return;
+          }
+          lookahead = null;
+          const captured = mediaStream?.active ? mediaStream : null;
+          running = false;
+          await startCapture(result.streamId, 'browser', captureEpoch, captured);
+        };
+        lookahead = startLookahead({ ...msg, onUnavailable: msg.youtubeId || msg.directMedia ? fallback : null }, (message) => {
+          if (message.type === 'CPU_AUDIO_SOURCE' && mediaStream) {
+            // A completed download no longer needs the preparation fallback.
+            mediaStream.getTracks().forEach((t) => t.stop()); mediaStream = null;
+            if (playback) playback.srcObject = null;
+          }
+          send(message);
+        });
       })().catch((error) => {
         stopCapture();
         send({ type: 'ERROR', error: error.message || String(error) });
@@ -345,20 +380,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse?.({ ok: true });
       break;
     case 'STOP_CAPTURE':
-      stopCapture();
-      sendResponse?.({ ok: true });
+      // Keep the offscreen document alive until its private disk cache and
+      // sandbox network session are gone; teardown closes the document next.
+      Promise.resolve(stopCapture()).then(() => sendResponse?.({ ok: true }), () => sendResponse?.({ ok: true }));
       break;
     case 'CPU_HIGHLIGHT_SETTING':
       lookahead?.setHighlight(msg.enabled);
       sendResponse?.({ ok: true });
       break;
     case 'RESET_CAPTURE':
+      if (msg.captureEpoch != null) captureEpoch = msg.captureEpoch;
       if (lookahead) {
-        lookahead.reset(msg.captureEpoch);
+        lookahead.reset(msg.captureEpoch, msg.time);
         sendResponse?.({ ok: true });
         break;
       }
-      if (msg.captureEpoch != null) captureEpoch = msg.captureEpoch;
       resetRecognition();
       sendResponse?.({ ok: true });
       break;

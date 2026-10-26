@@ -18,7 +18,8 @@ import align
 SR = 16000
 MAX_WINDOW = 24
 INITIAL_SECONDS = 180
-BATCH_SECONDS = 3600
+BATCH_SECONDS = 1800
+MAX_DURATION = 10 * 60 * 60
 
 
 class DownloadCancelled(Exception):
@@ -61,13 +62,19 @@ def run_media(command, cancelled, timeout):
                 process.communicate()
 
 
-def batch_bounds(index, duration):
-    start = 0 if index == 0 else INITIAL_SECONDS + (index - 1) * BATCH_SECONDS
-    return start, min(duration, INITIAL_SECONDS if index == 0 else start + BATCH_SECONDS)
+def batch_bounds(index, duration, initial_start=0):
+    if index < 0:
+        end = initial_start + (index + 1) * BATCH_SECONDS
+        return max(0, end - BATCH_SECONDS), end
+    start = initial_start if index == 0 else initial_start + INITIAL_SECONDS + (index - 1) * BATCH_SECONDS
+    return start, min(duration, start + (INITIAL_SECONDS if index == 0 else BATCH_SECONDS))
 
 
-def batch_index(position):
-    return 0 if position < INITIAL_SECONDS else 1 + int((position - INITIAL_SECONDS) // BATCH_SECONDS)
+def batch_index(position, initial_start=0):
+    if position < initial_start:
+        return -math.ceil((initial_start - position) / BATCH_SECONDS)
+    offset = position - initial_start
+    return 0 if offset < INITIAL_SECONDS else 1 + int((offset - INITIAL_SECONDS) // BATCH_SECONDS)
 
 
 def fetch_batch(source, index, report=None):
@@ -78,7 +85,7 @@ def fetch_batch(source, index, report=None):
     with lock:
         if source["cancelled"].is_set():
             raise DownloadCancelled("Audio download cancelled")
-        start, end = batch_bounds(index, source["duration"])
+        start, end = batch_bounds(index, source["duration"], source["initial_start"])
         path = source["cache"] / f"{int(start)}-{end:.3f}.flac"
         if not path.exists():
             if report:
@@ -96,9 +103,12 @@ def fetch_batch(source, index, report=None):
         return path
 
 
-def prepare(url, media=None, report=None, cancelled=None):
+def prepare(url, media=None, report=None, cancelled=None, position=0):
     if urlsplit(url).scheme not in ("http", "https"):
         raise ValueError("Open an HTTP(S) video page first.")
+    position = float(position)
+    if not math.isfinite(position) or position < 0:
+        raise ValueError("Invalid playback position.")
     import yt_dlp
     cancelled = cancelled if cancelled is not None else threading.Event()
     try:
@@ -131,10 +141,15 @@ def prepare(url, media=None, report=None, cancelled=None):
     duration = float(duration)
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("This video has no finite audio duration. Use CPU live listening for streams.")
+    if duration > MAX_DURATION:
+        raise ValueError("CPU audio downloads support videos up to 10 hours.")
     # Never share partial CPU downloads with the GPU's full-file cache.
     cache = align.CACHE_DIR / "cpu-batches" / hashlib.sha256(url.encode()).hexdigest()[:24]
     cache.mkdir(parents=True, exist_ok=True)
-    source = {"url": audio_url, "input_options": options, "cache": cache,
+    # Match the recognizer's ten-second seek pre-roll without fetching the
+    # beginning of the video. Earlier audio is downloaded only if requested.
+    initial_start = max(0, math.floor(min(position, duration)) - 10)
+    source = {"url": audio_url, "input_options": options, "cache": cache, "initial_start": initial_start,
               "duration": duration, "title": info.get("title", ""), "cancelled": cancelled,
               "locks": {}, "locks_guard": threading.Lock()}
     fetch_batch(source, 0, report)
@@ -148,8 +163,8 @@ def read_window(source, start, seconds):
     parts = []
     position, end = start, min(start + seconds, source["duration"])
     while position < end:
-        index = batch_index(position)
-        batch_start, batch_end = batch_bounds(index, source["duration"])
+        index = batch_index(position, source["initial_start"])
+        batch_start, batch_end = batch_bounds(index, source["duration"], source["initial_start"])
         path = fetch_batch(source, index)
         stop = min(end, batch_end)
         parts.append(run_media(
@@ -184,15 +199,17 @@ async def prepare_message(ws, data):
     closed = asyncio.create_task(watch_close())
     source = None
     try:
-        source = await asyncio.to_thread(prepare, data.get("url", ""), data.get("media"), report, cancelled)
+        source = await asyncio.to_thread(prepare, data.get("url", ""), data.get("media"), report, cancelled,
+                                         data.get("position", 0))
         if cancelled.is_set():
             raise DownloadCancelled("Audio download cancelled")
         await ws.send(json.dumps({"type": "cpu_audio_ready", "duration": source["duration"],
-                                   "title": source["title"], "sampleRate": SR}))
+                                   "title": source["title"], "sampleRate": SR,
+                                   "initialStart": source["initial_start"]}))
         async def prefetch():
             try:
                 index = 1
-                while batch_bounds(index, source["duration"])[0] < source["duration"]:
+                while batch_bounds(index, source["duration"], source["initial_start"])[0] < source["duration"]:
                     await asyncio.to_thread(fetch_batch, source, index)
                     index += 1
             except Exception:

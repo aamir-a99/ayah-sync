@@ -66,15 +66,56 @@ let cpuLookaheadPreference = true;
 let cpuHighlightPreference;
 let highlightTimer = null;
 let cpuBuffer = null;
+const cpuSegments = new Map();
 let bufferRaf = null;
 let bufferedWord = -2;
 let bufferedRef = null;
 let cpuBufferedMode = false;
 const MAX_DRIFT_MS = 7000;
 const MAX_LEAD = 4;
+const contentLifecycle = new AbortController();
+let disposed = false;
+let mediaTimer = null;
+
+function disposeContent() {
+  if (disposed) return;
+  disposed = true;
+  contentLifecycle.abort();
+  clearInterval(mediaTimer);
+  mediaTimer = null;
+  clearTimeline();
+  hideCard();
+  try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch {}
+}
+
+function extensionAvailable() {
+  if (disposed) return false;
+  try { if (chrome.runtime?.id) return true; } catch {}
+  disposeContent();
+  return false;
+}
+
+function runtimeMessage(message) {
+  if (!extensionAvailable()) return Promise.resolve(null);
+  const invalidated = (error) => {
+    if (/extension context invalidated/i.test(error?.message || '')) {
+      disposeContent();
+      return null;
+    }
+    throw error;
+  };
+  // sendMessage can throw synchronously after an extension reload, before an
+  // ordinary .catch() can run. Old page scripts must stop, not keep painting.
+  try { return chrome.runtime.sendMessage(message).catch(invalidated); }
+  catch (error) {
+    try { return Promise.resolve(invalidated(error)); }
+    catch (other) { return Promise.reject(other); }
+  }
+}
 
 // =============================================================== preferences
 chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCardWidth', 'qltAmbient', 'qltLang', 'qltRecognition', 'qltCPUHighlight', 'qltCPULookahead'], (v) => {
+  if (disposed) return;
   browserCPU = v?.qltRecognition === 'browser';
   cpuLookaheadPreference = v?.qltCPULookahead !== false;
   cpuHighlightPreference = v?.qltCPUHighlight;
@@ -89,13 +130,15 @@ chrome.storage?.local.get(['showTranslation', 'qltScript', 'qltFontSize', 'qltCa
   rerender();
 });
 chrome.storage?.onChanged.addListener((changes, area) => {
+  if (disposed) return;
   if (area !== 'local') return;
   if (changes.qltRecognition || changes.qltCPUHighlight || changes.qltCPULookahead) {
     if (changes.qltRecognition) browserCPU = changes.qltRecognition.newValue === 'browser';
     if (changes.qltCPUHighlight) cpuHighlightPreference = changes.qltCPUHighlight.newValue;
     if (changes.qltCPULookahead) cpuLookaheadPreference = changes.qltCPULookahead.newValue !== false;
     cpuHighlight = cpuHighlightPreference ?? cpuLookaheadPreference;
-    if (liveMatch) showLive(liveMatch);
+    if (cpuBuffer) bufferedWord = -2;
+    else if (liveMatch) showLive(liveMatch);
     else if (browserCPU && !tl) paintWords(Infinity);
   }
   if (changes.showTranslation) showTranslation = changes.showTranslation.newValue !== false;
@@ -134,7 +177,8 @@ function rerender() {
   shown = null;
   builtText = '';
   renderAyah(a, a.__next || null);
-  if (!tl && browserCPU && liveMatch) paintCpuHighlight(liveMatch.highlight);
+  if (cpuBuffer) bufferedWord = -2;
+  else if (!tl && browserCPU && liveMatch) paintCpuHighlight(liveMatch.highlight);
 }
 
 // ===================================================================== fonts
@@ -155,7 +199,7 @@ function fetchFonts() {
       // Fetch in the extension, not the host page's security context. Direct
       // extension URLs can be rejected by sites such as YouTube even when the
       // files are web-accessible; falling back afterwards still logs errors.
-      const r = await chrome.runtime.sendMessage({ type: 'FONT_GET', file });
+      const r = await runtimeMessage({ type: 'FONT_GET', file });
       if (!r?.b64) throw new Error(`Bundled font unavailable: ${file}`);
       const bin = atob(r.b64);
       const buf = Uint8Array.from(bin, (c) => c.charCodeAt(0)).buffer;
@@ -182,6 +226,10 @@ async function installFonts(win) {
 // ====================================================================== card
 function ensureCard() {
   if (host && host.isConnected) return;
+
+  // A previous extension build can leave an orphaned card in an existing tab.
+  // Only the newly connected content script may own this page's card.
+  document.querySelectorAll(`#${HOST_ID}`).forEach((node) => node.remove());
 
   host = document.createElement('div');
   host.id = HOST_ID;
@@ -227,6 +275,7 @@ function ensureCard() {
       /* Passage ribbon: where we are in the video, with a notch per ayah. */
       .ribbon { position: relative; height: 14px; cursor: pointer; background: var(--paper-2); border-bottom: 1px solid var(--rule); }
       .ribbon .span { position: absolute; top: 6px; height: 2px; background: var(--ink-3); opacity: .55; border-radius: 1px; }
+      .ribbon[data-mode="cpu"] .span { background: var(--green); opacity: .7; }
       .ribbon .tick { position: absolute; top: 4px; width: 1px; height: 6px; background: var(--ink-3); }
       .ribbon .fill { position: absolute; top: 6px; left: 0; height: 2px; background: var(--green); border-radius: 1px; }
       .ribbon .head { position: absolute; top: 3px; width: 2px; height: 8px; margin-left: -1px; background: var(--green); border-radius: 1px; }
@@ -343,9 +392,9 @@ function ensureCard() {
   els.close.addEventListener('click', () => {
     if (tl) {
       clearTimeline();
-      chrome.runtime.sendMessage({ type: 'SYNC_CLEAR' }).catch(() => {});
+      runtimeMessage({ type: 'SYNC_CLEAR' }).catch(() => {});
     } else {
-      chrome.runtime.sendMessage({ type: 'STOP' }).catch(() => {});
+      runtimeMessage({ type: 'STOP' }).catch(() => {});
     }
     hideCard();
   });
@@ -356,7 +405,7 @@ function ensureCard() {
     els.restartCpu.disabled = true;
     els.restartCpu.textContent = 'Starting CPU sync…';
     try {
-      const result = await chrome.runtime.sendMessage({ type: 'CPU_RESTART_VIDEO' });
+      const result = await runtimeMessage({ type: 'CPU_RESTART_VIDEO' });
       if (result?.error) throw new Error(result.error);
     } catch (error) {
       if (!els) return;
@@ -371,13 +420,16 @@ function ensureCard() {
   els.next.addEventListener('click', () => seekAyah(1));
   els.ribbon.addEventListener('click', (e) => {
     const v = findVideo();
-    if (!tl || !v) return;
+    if (!v || (!tl && (!cpuBuffer || videoKey(location.href) !== cpuBuffer.key))) return;
     const r = els.ribbon.getBoundingClientRect();
-    const duration = tl.duration;
+    const duration = tl?.duration ?? cpuBuffer.duration;
+    if (!Number.isFinite(duration) || duration <= 0) return;
     const t = Math.max(0, Math.min(duration, ((e.clientX - r.left) / r.width) * duration));
     // Snap to the start of the ayah under the pointer.
-    const i = ayahIndexAt(t);
-    v.currentTime = Math.max(0, (i >= 0 ? tl.ayahs[i].t0 : t) - 0.05);
+    if (tl) {
+      const i = ayahIndexAt(t);
+      v.currentTime = Math.max(0, (i >= 0 ? tl.ayahs[i].t0 : t) - 0.05);
+    } else v.currentTime = t;
   });
 
   // Resize from either side edge or the bottom corners (height follows content).
@@ -416,15 +468,16 @@ function ensureCard() {
       host.style.top = `${e.clientY - dragState.dy}px`;
       host.style.right = 'auto';
     }
-  });
+  }, { signal: contentLifecycle.signal });
   window.addEventListener('mouseup', () => {
+    if (!extensionAvailable()) return;
     if (!host || (!rz && !dragState)) return;
     const save = { cardPos: { left: host.style.left, top: host.style.top } };
     if (rz) save.qltCardWidth = cardWidth;
     rz = null;
     dragState = null;
     if (host.style.left) chrome.storage?.local.set(save);
-  });
+  }, { signal: contentLifecycle.signal });
 
   applyPrefs();
   installFonts(window);
@@ -449,7 +502,7 @@ function toggleMedia() {
     if (v.paused) v.play().catch(() => {});
     else v.pause();
   } else {
-    chrome.runtime.sendMessage({ type: 'MEDIA_TOGGLE' }).catch(() => {});
+    runtimeMessage({ type: 'MEDIA_TOGGLE' }).catch(() => {});
   }
 }
 
@@ -489,7 +542,7 @@ document.addEventListener('qlt-pip-opened', () => {
       .join('');
   els.card.classList.add('pip');
   restartLoops();
-});
+}, { signal: contentLifecycle.signal });
 document.addEventListener('qlt-pip-closed', () => {
   inPip = false;
   if (!host || host.dataset.pipGone) return;
@@ -497,17 +550,17 @@ document.addEventListener('qlt-pip-closed', () => {
   els.card.classList.remove('pip');
   applyPrefs();
   restartLoops();
-});
+}, { signal: contentLifecycle.signal });
 document.addEventListener('qlt-pip-error', () => {
   if (els) els.pop.title = 'Floating window is not available in this browser';
-});
+}, { signal: contentLifecycle.signal });
 // Keys pressed in the floating window: space pauses, arrows step through ayahs.
 document.addEventListener('qlt-pip-key', () => {
   const key = host?.dataset.pipKey;
   if (key === 'space') toggleMedia();
   else if (key === 'prev') seekAyah(-1);
   else if (key === 'next') seekAyah(1);
-});
+}, { signal: contentLifecycle.signal });
 
 function restartLoops() {
   caf(tlRaf);
@@ -523,6 +576,7 @@ function hideCard() {
   caf(bufferRaf);
   bufferRaf = null;
   cpuBuffer = null;
+  cpuSegments.clear();
   bufferedRef = null;
   if (inPip && host) {
     host.dataset.pipGone = '1';
@@ -660,8 +714,7 @@ function loadTranslations(refs) {
   refs = [...new Set(refs.filter((r) => r && !trMap[r]))];
   if (lang === 'en' || !refs.length) return;
   const asked = lang;
-  chrome.runtime
-    .sendMessage({ type: 'TR_GET', lang, refs })
+  runtimeMessage({ type: 'TR_GET', lang, refs })
     .then((r) => {
       if (!r?.map || asked !== lang) return;
       Object.assign(trMap, r.map);
@@ -788,6 +841,7 @@ function loadTimeline(timeline) {
   liveRaf = null;
   liveMatch = null;
   tl = timeline;
+  cpuSegments.clear();
   tlIdx = -2;
   lastHref = location.href;
   ensureCard();
@@ -832,6 +886,7 @@ function clearTimeline() {
 }
 
 function tlTick() {
+  if (!extensionAvailable()) return;
   if (!tl) return;
   tlRaf = raf(tlTick);
 
@@ -906,8 +961,7 @@ function seekAyah(dir) {
 
 /** Ask the service worker whether this page's video already has a timeline. */
 function helloTimeline() {
-  chrome.runtime
-    .sendMessage({ type: 'TL_HELLO', url: location.href })
+  runtimeMessage({ type: 'TL_HELLO', url: location.href })
     .then((r) => {
       if (r?.timeline) loadTimeline(r.timeline);
     })
@@ -964,6 +1018,7 @@ function paintCpuHighlight(highlight) {
 }
 
 function liveTick() {
+  if (!extensionAvailable()) return;
   if (!els || !liveMatch || wordEls.length === 0) {
     liveRaf = null;
     return;
@@ -980,16 +1035,58 @@ function liveTick() {
   paintWords(shownWord);
 }
 
+function renderCpuTimeline() {
+  if (!els || !cpuBuffer || !Number.isFinite(cpuBuffer.duration) || cpuBuffer.duration <= 0) return;
+  const pct = (t) => `${Math.max(0, Math.min(100, t / cpuBuffer.duration * 100)).toFixed(3)}%`;
+  els.ribbon.dataset.mode = 'cpu';
+  els.ribbon.title = 'CPU processed sections · click to seek';
+  els.ribbon.classList.toggle('hidden', videoKey(location.href) !== cpuBuffer.key);
+  els.fill.style.width = '0%'; // Never paint unprocessed gaps as recognized.
+  const signature = `${cpuBuffer.key}:${cpuBuffer.duration}:${(cpuBuffer.ranges || []).map((r) => r.id).join(',')}:${(cpuBuffer.marks || []).join(',')}`;
+  if (els.cpuTimelineSignature === signature) {
+    const spans = els.spans.querySelectorAll('.span');
+    for (let i = 0; i < spans.length; i++) {
+      const range = cpuBuffer.ranges[i];
+      spans[i].style.left = pct(range.from);
+      spans[i].style.width = pct(Math.min(cpuBuffer.duration, range.until) - range.from);
+      spans[i].title = `Processed ${clock(range.from)}–${clock(range.until)}`;
+    }
+    return;
+  }
+  els.cpuTimelineSignature = signature;
+  const fragment = document.createDocumentFragment();
+  for (const range of cpuBuffer.ranges || []) {
+    const span = document.createElement('div');
+    span.className = 'span';
+    span.style.left = pct(range.from);
+    span.style.width = pct(Math.min(cpuBuffer.duration, range.until) - range.from);
+    span.title = `Processed ${clock(range.from)}–${clock(range.until)}`;
+    fragment.append(span);
+  }
+  for (const time of cpuBuffer.marks || []) {
+    const tick = document.createElement('div');
+    tick.className = 'tick';
+    tick.style.left = pct(time);
+    fragment.append(tick);
+  }
+  els.spans.replaceChildren(fragment);
+}
+
 function bufferTick() {
+  if (!extensionAvailable()) return;
   if (!cpuBuffer || !els) { bufferRaf = null; return; }
   bufferRaf = raf(bufferTick);
   const v = findVideo();
   if (!v) return;
+  if (!Number.isFinite(cpuBuffer.duration) || cpuBuffer.duration <= 0) return;
   const t = v.currentTime;
+  els.ribbon.classList.toggle('hidden', videoKey(location.href) !== cpuBuffer.key);
+  els.head.style.left = `${Math.max(0, Math.min(100, t / cpuBuffer.duration * 100))}%`;
   const valid = videoKey(location.href) === cpuBuffer.key &&
     Math.abs(v.duration - cpuBuffer.duration) <= 5 && !v.seeking;
-  const cue = valid && cpuBuffer.ready === true && t >= cpuBuffer.from && t <= cpuBuffer.until + 0.5
-    ? cpuBuffer.cues.findLast((c) => c.t0 <= t) : null;
+  const cue = valid && cpuBuffer.ready === true && t >= (cpuBuffer.cueFrom ?? cpuBuffer.from) && t <= (cpuBuffer.cueUntil ?? cpuBuffer.until) + 0.5
+    ? cpuBuffer.cues[ayahIndexAt(t, cpuBuffer.cues)] : null;
+  setPlayIcon(!v.paused);
   if (!cue) {
     const text = videoKey(location.href) === cpuBuffer.key
       ? cpuBuffer.ready !== true
@@ -1005,7 +1102,6 @@ function bufferTick() {
   const changed = shown?.ref !== cue.match.ref;
   liveMatch = cue.match;
   renderAyah(cue.match, cue.match.next);
-  setPlayIcon(!v.paused);
   const timing = cue.highlightWords?.length ? cue.highlightWords : cue.words;
   const span = cpuHighlight ? timing.findLast((w) => w.start <= t && t < w.end) : null;
   const word = span?.word ?? -1;
@@ -1016,7 +1112,7 @@ function bufferTick() {
   }
   if (bufferedRef !== cue.match.ref) {
     bufferedRef = cue.match.ref;
-    chrome.runtime.sendMessage({ type: 'BUFFER_POSITION', match: cue.match,
+    runtimeMessage({ type: 'BUFFER_POSITION', match: cue.match,
       captureEpoch: cpuBuffer.captureEpoch }).catch(() => {});
   }
 }
@@ -1025,22 +1121,29 @@ function bufferTick() {
 let mediaArmed = false;
 let reportedPlaying = null;
 function reportMedia() {
+  if (!extensionAvailable()) return;
   let playing = false;
   for (const m of document.querySelectorAll('video, audio')) {
     if (!m.paused && !m.ended && m.readyState >= 2) playing = true;
   }
   if (playing !== reportedPlaying) {
     reportedPlaying = playing;
-    chrome.runtime.sendMessage({ type: 'MEDIA_STATE', playing }).catch(() => {});
+    runtimeMessage({ type: 'MEDIA_STATE', playing }).catch(() => {});
   }
 }
 function armMediaWatch() {
   if (mediaArmed) return reportMedia();
   mediaArmed = true;
   document.addEventListener('seeking', (event) => {
+    if (!extensionAvailable()) return;
     if (!event.target?.matches?.('video, audio') || tl) return;
     const following = !!liveMatch;
-    cpuBuffer = null;
+    if (cpuBuffer && videoKey(location.href) === cpuBuffer.key) {
+      const time = event.target.currentTime;
+      const cached = [...cpuSegments.values()].find((s) => s.ready && time >= (s.cueFrom ?? s.from) && time <= (s.cueUntil ?? s.until));
+      cpuBuffer = cached ? { ...cached, ranges: cpuBuffer.ranges, marks: cpuBuffer.marks }
+        : { ...cpuBuffer, from: null, until: null, cues: [], ready: false, preparedSeconds: 0 };
+    }
     bufferedRef = null;
     caf(bufferRaf);
     bufferRaf = null;
@@ -1049,10 +1152,11 @@ function armMediaWatch() {
     shownWord = -1;
     shown = null;
     paintWords(-1);
-    if (following) setStatus('Identifying the new passage…', 'wait');
-    chrome.runtime.sendMessage({ type: 'CAPTURE_RESET' }).catch(() => {});
-  }, true);
-  setInterval(reportMedia, 500);
+    if (following && !cpuBuffer?.ready) setStatus('Identifying the new passage…', 'wait');
+    if (cpuBuffer) bufferRaf = raf(bufferTick);
+    runtimeMessage({ type: 'CAPTURE_RESET', time: event.target.currentTime }).catch(() => {});
+  }, { capture: true, signal: contentLifecycle.signal });
+  mediaTimer = setInterval(reportMedia, 500);
   reportMedia();
 }
 
@@ -1067,16 +1171,22 @@ const liveStatus = (status) => browserCPU && cpuBufferedMode
   : status === 'loading-model' && browserCPU ? 'Listening live · loading CPU model…' : LIVE_STATUS[status] || '';
 
 // ================================================================== messages
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+function onRuntimeMessage(msg, _sender, sendResponse) {
+  if (!extensionAvailable()) return;
+  if (msg?.type === 'CONTENT_PING') {
+    sendResponse({ ok: true });
+    return;
+  }
   if (msg?.type === 'CAPTURE_CLOCK') {
     const v = findVideo();
-    sendResponse(v ? { key: videoKey(location.href), href: location.href, time: v.currentTime, duration: v.duration,
+    sendResponse(v ? { key: videoKey(location.href), href: location.href, src: v.currentSrc || v.src || '', time: v.currentTime, duration: v.duration,
       playbackRate: v.playbackRate, seeking: v.seeking, paused: v.paused } : null);
     return;
   }
   if (msg?.type === 'TL_MEDIA') {
     const v = findVideo();
-    sendResponse({ src: v ? v.currentSrc || v.src || '' : '', duration: v ? v.duration : 0, href: location.href });
+    sendResponse({ src: v ? v.currentSrc || v.src || '' : '', duration: v ? v.duration : 0,
+      time: v ? v.currentTime : 0, encrypted: !!v?.mediaKeys, href: location.href });
     return;
   }
   switch (msg?.type) {
@@ -1116,12 +1226,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       ensureCard();
       els.debug.textContent = msg.text || '';
       els.debug.classList.toggle('hidden', !msg.text);
-      if (browserCPU && !shown && msg.text) {
+      if (browserCPU && !cpuBufferedMode && !shown && msg.text) {
         setStatus(/^Listening live/i.test(msg.text) ? msg.text : `Listening live · ${msg.text}`, 'wait');
       }
       break;
     case 'CARD_UPDATE':
-      if (!tl && msg.match) showLive(msg.match);
+      if (!tl && !cpuBuffer && msg.match) showLive(msg.match);
       break;
     case 'CARD_HIGHLIGHT':
       if (!tl && browserCPU && liveMatch) {
@@ -1135,7 +1245,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       clearTimeout(highlightTimer);
       caf(liveRaf);
       liveRaf = null;
+      if (cpuBuffer?.key !== msg.buffer.key) cpuSegments.clear();
       cpuBuffer = msg.buffer;
+      if (cpuBuffer.segmentId != null) cpuSegments.set(cpuBuffer.segmentId, cpuBuffer);
+      const retained = new Set((cpuBuffer.ranges || []).map((r) => r.id));
+      for (const id of cpuSegments.keys()) if (!retained.has(id)) cpuSegments.delete(id);
+      renderCpuTimeline();
       bufferedWord = -2;
       if (bufferRaf == null) bufferRaf = raf(bufferTick);
       break;
@@ -1162,7 +1277,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       armMediaWatch();
       break;
   }
-});
+}
+chrome.runtime.onMessage.addListener(onRuntimeMessage);
+
+// Hand off cleanly if a rebuilt content bundle is injected into the same page.
+document.dispatchEvent(new Event('qlt-content-replace'));
+document.addEventListener('qlt-content-replace', disposeContent, { signal: contentLifecycle.signal });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) extensionAvailable();
+}, { signal: contentLifecycle.signal });
 
 // A reloaded page (or a tab opened before the extension) picks its sync back up.
 helloTimeline();

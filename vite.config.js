@@ -9,6 +9,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         offscreen: 'src/offscreen/offscreen.html',
+        youtubeSandbox: 'src/cpu/youtube-sandbox.html',
       },
     },
   },

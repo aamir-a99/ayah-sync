@@ -10,6 +10,8 @@ import './test-live-routing.mjs';
 import './test-lookahead-buffer.mjs';
 import './test-startup-buffer.mjs';
 import './test-ctc-alignment.mjs';
+import './test-cpu-short-ayahs.mjs';
+import './test-ayah-onset.mjs';
 
 const data = (name) => JSON.parse(readFileSync(new URL(`../src/data/${name}.json`, import.meta.url)));
 const arabic = data('quran-uthmani');
