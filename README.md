@@ -156,8 +156,10 @@ Select **Recognition → Browser CPU**, then **Start CPU sync**. The bundled int
 [Abdou/quran-asr-small on Hugging Face](https://huggingface.co/Abdou/quran-asr-small)
 model runs locally in the browser—no NVIDIA GPU or audio upload required.
 
-- **Auto CPU look-ahead:** uses an available helper to download audio, then
-  recognizes 12 seconds ahead. It waits for the initial buffer before displaying
+- **Auto CPU look-ahead:** uses an available helper to download the first 3 minutes
+  of audio, then downloads the rest in 1-hour batches in the background. Seeking
+  fetches the needed batch on demand. CPU recognition stays 12 seconds ahead;
+  GPU downloads are unchanged. It waits for the initial buffer before displaying
   ayahs and follows playback through pauses and seeks. Helper setup is in
   [Quick start on CPU](#quick-start-on-cpu); only one helper can use port 8790.
 - **Live-only:** works without Python. Disable Auto CPU look-ahead to force it;

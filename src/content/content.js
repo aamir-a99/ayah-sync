@@ -1108,7 +1108,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         bufferRaf = null;
         setStatus(msg.error || 'Something went wrong.', 'err');
       }
-      else if (!shown) setStatus(liveStatus(msg.status), 'wait');
+      else if (!shown) setStatus(msg.detail || liveStatus(msg.status), 'wait');
       break;
     case 'CARD_DEBUG':
       if (!DEV_MODE) break;

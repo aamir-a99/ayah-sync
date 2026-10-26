@@ -13,6 +13,7 @@ export function startLookahead({ url, media, key, captureEpoch, highlightEnabled
   let source = null, block = null, cursor = null, requestId = 0;
   let lastPlayhead = null;
   let timer = null;
+  let prepareTimer = null;
   let alignWords = highlightEnabled, refinePending = false;
   const buffer = new LookaheadBuffer();
   const startup = new StartupBuffer(AHEAD);
@@ -29,6 +30,7 @@ export function startLookahead({ url, media, key, captureEpoch, highlightEnabled
   function stop() {
     stopped = true;
     clearTimeout(timer);
+    clearTimeout(prepareTimer);
     clearTimeout(workerRequest?.timer);
     clearTimeout(audioRequest?.timer);
     worker?.terminate(); socket?.close();
@@ -72,7 +74,8 @@ export function startLookahead({ url, media, key, captureEpoch, highlightEnabled
   function requestAudio(start) {
     return new Promise((resolve, reject) => {
       audioRequest = { id: ++requestId, resolve, reject,
-        timer: setTimeout(() => reject(new Error('Audio window timed out')), 45000) };
+        // A seek may need to download an uncached one-hour CPU audio batch.
+        timer: setTimeout(() => reject(new Error('Audio window timed out')), 7230000) };
       socket.send(JSON.stringify({ type: 'cpu_audio_window', id: requestId, start, seconds: 20 }));
     });
   }
@@ -163,6 +166,7 @@ export function startLookahead({ url, media, key, captureEpoch, highlightEnabled
     if (initialized || !source || !socketReady || stopped) return;
     initialized = true;
     debug('loading CPU model…');
+    send({ type: 'STATUS', status: 'loading-model', detail: 'CPU sync · loading CPU model…' });
     try {
       const ready = await loadWorker();
       if (stopped) return;
@@ -172,6 +176,7 @@ export function startLookahead({ url, media, key, captureEpoch, highlightEnabled
     } catch (error) { fail(error); }
   }
   debug('fetching video audio in background…');
+  prepareTimer = setTimeout(() => fail(new Error('Audio preparation timed out. Restart the local helper and try again.')), 300000);
   socket = new WebSocket('ws://127.0.0.1:8790');
   socket.onopen = () => socket.send(JSON.stringify({ type: 'cpu_audio_prepare', url, media }));
   socket.onerror = () => fail(new Error('Audio helper unavailable'));
@@ -180,9 +185,14 @@ export function startLookahead({ url, media, key, captureEpoch, highlightEnabled
     try {
       const data = JSON.parse(message);
       if (data.type === 'ready') socketReady = true;
-      else if (data.type === 'cpu_audio_progress') debug(`fetching audio · ${Math.round(data.pct * 100)}%`);
+      else if (data.type === 'cpu_audio_progress') {
+        debug(`fetching audio · ${Math.round(data.pct * 100)}%`);
+        const phase = data.stage === 'resolving' ? 'finding audio source' : 'downloading first 3 min';
+        send({ type: 'STATUS', status: 'loading-model', detail: `CPU sync · ${phase} · ${data.elapsedSeconds || 0}s elapsed…` });
+      }
       else if (data.type === 'cpu_audio_error') throw new Error(data.error);
       else if (data.type === 'cpu_audio_ready') {
+        clearTimeout(prepareTimer);
         if (data.sampleRate !== SR || !Number.isFinite(data.duration)) throw new Error('Invalid audio metadata');
         source = data;
       } else if (data.type === 'cpu_audio_window' && audioRequest?.id === data.id) {

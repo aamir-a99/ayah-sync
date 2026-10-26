@@ -87,7 +87,7 @@ function render() {
     $('liveHeading').textContent = local
       ? DEV_MODE ? state.debug || 'Starting local recognition…'
         : state.backend === 'lookahead'
-          ? state.status === 'loading-model' ? 'CPU sync · preparing audio…'
+          ? state.status === 'loading-model' ? state.preparationText || 'CPU sync · preparing audio…'
             : state.lastMatch ? 'Following video · CPU look-ahead' : 'CPU sync · preparing upcoming ayahs…'
           : state.status === 'loading-model' ? 'Listening live · loading CPU model…'
             : state.lastMatch ? 'Listening live' : 'Listening live · identifying recitation…'

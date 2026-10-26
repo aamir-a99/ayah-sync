@@ -328,6 +328,7 @@ async function teardown() {
   state.displayTabId = null;
   state.status = 'idle';
   state.modelProgress = null;
+  state.preparationText = null;
   state.buffered = null;
 }
 
@@ -633,11 +634,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // --- messages coming FROM the offscreen document ---
     case 'STATUS':
       state.status = msg.status;
+      state.preparationText = msg.detail || null;
       if (msg.status === 'stopped') state.capturing = false;
       broadcastState();
       (async () => {
         const tabId = await resolveDisplayTabId();
-        if (tabId != null) tellCard(tabId, { type: 'CARD_STATUS', status: msg.status });
+        if (tabId != null) tellCard(tabId, { type: 'CARD_STATUS', status: msg.status, detail: msg.detail });
       })();
       return true;
 
@@ -647,7 +649,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       (async () => {
         const tabId = await resolveDisplayTabId();
         if (tabId != null)
-          tellCard(tabId, { type: 'CARD_STATUS', status: 'loading-model', progress: msg.progress });
+          tellCard(tabId, { type: 'CARD_STATUS', status: 'loading-model', progress: msg.progress, detail: state.preparationText });
       })();
       return true;
 
