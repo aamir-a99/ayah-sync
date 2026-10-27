@@ -29,8 +29,9 @@ export class PassageTracker {
       nearEnd: !!this.current && this.current.word >= this.current.wordCount - 2 };
   }
 
-  accept(candidate, observation) {
-    const wasLocked = this.locked;
+  accept(candidate, observation, newPassage = false) {
+    const wasLocked = this.locked && !newPassage;
+    if (newPassage) this.lastWordStart = null;
     const previousPos = this.current?.pos ?? -1;
     const { alternatives, supported, ...match } = candidate;
     if (wasLocked && candidate.ref === this.current?.next?.ref) this.collectPrefix(candidate, observation);
@@ -112,7 +113,10 @@ export class PassageTracker {
       }
       return null;
     }
-    if (this.locked) {
+    // Keep Al-Fatiha on screen while confirming the next passage globally.
+    // Do not wait for six local misses or bias the search toward Al-Baqarah.
+    const afterFatiha = this.locked && this.current?.ref === '1:7';
+    if (this.locked && !afterFatiha) {
       const candidate = this.matcher.match(text, this.anchor, {
         localOnly: true, nearbyRefs: this.matcher.nearbyRefs(this.anchor), evidenceOnly: true,
       });
@@ -135,6 +139,14 @@ export class PassageTracker {
       this.reset();
     }
     let candidate = this.matcher.match(text, null, { evidenceOnly: true });
+    if (afterFatiha && candidate?.surah === 1 && candidate.ayah !== 1) {
+      // Old Al-Fatiha audio in the rolling window cannot start a new passage.
+      const local = this.matcher.match(text, this.anchor, {
+        localOnly: true, nearbyRefs: new Set(['1:7']), evidenceOnly: true,
+      });
+      return local?.ref === '1:7' && local.score >= 0.35 && local.evidenceWords >= 2
+        ? this.accept(local, observation) : null;
+    }
     if (!candidate || candidate.score < 0.6 || candidate.evidenceWords < 3) {
       if (words.length >= 3 && (this.misses += observationWeight) >= 6) {
         this.pending = null;
@@ -162,7 +174,7 @@ export class PassageTracker {
     this.pending = candidate;
     // An isolated basmala/refrain has several identical locations. Gather more
     // surrounding audio rather than falsely claiming which surah it belongs to.
-    if (this.confirmations >= 2 && !candidate.ambiguous) return this.accept(candidate, observation);
+    if (this.confirmations >= 2 && !candidate.ambiguous) return this.accept(candidate, observation, afterFatiha);
     return null;
   }
 }

@@ -92,6 +92,9 @@ class QuranMatcher:
         }
 
     def _next_ref(self, surah, ayah):
+        # In salah, any passage may follow Al-Fatiha; do not preview Al-Baqarah.
+        if surah == 1 and ayah == 7:
+            return None
         meta = self._surah_by_num.get(surah)
         if meta and ayah < meta["ayahs"]:
             return f"{surah}:{ayah + 1}"

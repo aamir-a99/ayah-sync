@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { QuranMatcher, normalizeArabic } from '../src/cpu/match.js';
 import { AudioWindow } from '../src/cpu/audio-window.js';
 import './test-local-tracking.mjs';
+import './test-fatiha-transition.mjs';
 import './test-cpu-live.mjs';
 import './test-cpu-words.mjs';
 import './test-audio-features.mjs';

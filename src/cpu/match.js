@@ -52,7 +52,8 @@ export class QuranMatcher {
     pos = Math.max(0, Math.min(pos, this.refs.length - 1));
     const a = this.ayah(this.refs[pos]);
     if (!a) return null;
-    const nextRef = a.ayah < this.meta.get(a.surah).ayahs ? `${a.surah}:${a.ayah + 1}`
+    // In salah, Al-Fatiha can be followed by any passage, not necessarily 2:1.
+    const nextRef = a.ref === '1:7' ? null : a.ayah < this.meta.get(a.surah).ayahs ? `${a.surah}:${a.ayah + 1}`
       : a.surah < 114 ? `${a.surah + 1}:1` : null;
     return { ...a, score, pos, word: this.words[pos],
       wordCount: a.arabic.trim().split(/\s+/).length, next: this.ayah(nextRef || '') };
@@ -60,7 +61,8 @@ export class QuranMatcher {
 
   nearbyRefs(anchor) {
     const i = this.orderedRefs.indexOf(this.refs[anchor]);
-    return new Set(this.orderedRefs.slice(Math.max(0, i - 1), i + 3));
+    const refs = this.orderedRefs.slice(Math.max(0, i - 1), i + 3);
+    return new Set(this.refs[anchor] === '1:7' ? refs.filter((ref) => ref.startsWith('1:')) : refs);
   }
 
   // Full short ayahs need context, not a weaker global n-gram threshold.
