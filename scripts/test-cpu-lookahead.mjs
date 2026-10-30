@@ -81,7 +81,7 @@ try {
   await observer.waitForFunction(async () => {
     const { qltState: s } = await chrome.storage.session.get('qltState');
     if (s?.error) return true;
-    return s?.backend === 'lookahead' && s.buffered?.until >= 37;
+    return s?.backend === 'lookahead' && s.buffered?.until >= 37 && s.debug?.includes('buffer ready');
   }, { timeout: 90000, polling: 200 }).catch(async (error) => {
     console.error(await observer.evaluate(() => chrome.storage.session.get('qltState'))); throw error;
   });
@@ -133,7 +133,8 @@ try {
   assert.equal((await observer.evaluate(async () => (await chrome.storage.session.get('qltState')).qltState)).error, null);
   await observer.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP' }));
   await observer.waitForFunction(async () =>
-    (await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })).length === 0);
+    (await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })).length === 0,
+    { timeout: 15000, polling: 100 });
   console.log('Automatic helper discovery, CPU future recognition, timed display, bounded idle work and seek recovery passed.');
 } finally {
   await browser?.close();

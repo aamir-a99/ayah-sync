@@ -1,8 +1,8 @@
 import { LookaheadCache } from './lookahead-cache.js';
-import { StartupBuffer } from './startup-buffer.js';
+import { StartupBuffer, CPU_LOOKAHEAD_SECONDS, CPU_AMBIGUOUS_LOOKAHEAD_SECONDS } from './startup-buffer.js';
 
 const SR = 16000;
-const AHEAD = 12;
+const AHEAD = CPU_LOOKAHEAD_SECONDS;
 
 // Exclusive alternative to live tab capture. One worker, one PCM block and one
 // inference request; compressed audio may download independently in background.
@@ -17,16 +17,29 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
   let windowAbort = new AbortController();
   let modelReady = false;
   let source = null, block = null, cursor = null, requestId = 0;
-  let lastPlayhead = null;
+  let lastClock = null, publishedPlayhead = null;
   let timer = null;
   let prepareTimer = null;
   let alignWords = highlightEnabled, refinePending = false;
+  let tracking = null;
   const cache = new LookaheadCache();
   let segment = null, buffer = null;
   let replaying = false;
+  let seekCheck = false;
+  let extendedSeekCheck = false;
   const startup = new StartupBuffer(AHEAD);
   function publish(playhead) {
-    const progress = startup.update(playhead, source.duration, buffer.from, buffer.until);
+    publishedPlayhead = playhead;
+    startup.seconds = seekCheck && extendedSeekCheck ? CPU_AMBIGUOUS_LOOKAHEAD_SECONDS : AHEAD;
+    let progress = startup.update(playhead, source.duration, buffer.from, buffer.until);
+    // First inspect twelve seconds after a seek. Only unresolved competing
+    // locations extend that first check; consecutive ayahs are not ambiguity.
+    if (seekCheck && !extendedSeekCheck && progress.ready && new Set(tracking?.ambiguousRefs || []).size > 1) {
+      extendedSeekCheck = true;
+      startup.reset(CPU_AMBIGUOUS_LOOKAHEAD_SECONDS);
+      progress = startup.update(playhead, source.duration, buffer.from, buffer.until);
+    }
+    if (progress.ready) seekCheck = false;
     segment.ready ||= progress.ready;
     const payload = buffer.payload(playhead);
     send({ type: 'BUFFER', key, duration: source.duration, ...payload, ...progress,
@@ -102,11 +115,14 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
       socket.send(JSON.stringify({ type: 'cpu_audio_window', id: requestId, start, seconds: 20 }));
     });
   }
-  function reset(nextEpoch, time = null) {
+  function reset(nextEpoch, time = null, seeking = true) {
     epoch = nextEpoch ?? epoch;
     generation++;
     windowAbort.abort(); windowAbort = new AbortController();
-    cursor = null; lastPlayhead = null; block = null; startup.reset();
+    if (seeking) seekCheck = true;
+    extendedSeekCheck = false;
+    cursor = null; lastClock = null; block = null; tracking = null;
+    startup.reset(AHEAD);
     // An outstanding single-flight inference is allowed to finish and is
     // discarded by generation. The reset message is processed before new audio.
     worker?.postMessage({ type: 'reset' });
@@ -116,15 +132,14 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
     if (Number.isFinite(time)) selectPosition(time);
     else send({ type: 'BUFFER', key, duration: source?.duration, ...cache.timeline(),
       from: null, until: null, cues: [], ready: false,
-      preparedSeconds: 0, requiredSeconds: AHEAD, captureEpoch: epoch });
+      preparedSeconds: 0, requiredSeconds: startup.seconds, captureEpoch: epoch });
   }
   function selectPosition(time) {
     segment = cache.select(time);
     replaying = segment.ready;
     buffer = segment.buffer;
     cursor = segment.cursor;
-    lastPlayhead = time;
-    startup.ready = segment.ready;
+    startup.ready = !seekCheck && segment.ready;
     publish(time);
   }
   function alignmentCues() {
@@ -144,6 +159,8 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
     let submitted = generation;
     try {
       const clock = await chrome.runtime.sendMessage({ type: 'CAPTURE_CLOCK' });
+      if (stopped) return;
+      if (submitted !== generation) { timer = setTimeout(loop, 0); return; }
       if (!clock || clock.key !== key || !Number.isFinite(clock.time)) {
         timer = setTimeout(loop, 1000); return;
       }
@@ -151,11 +168,16 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
       if (clock.seeking || Math.abs(clock.duration - source.duration) > 5) {
         timer = setTimeout(loop, 500); return;
       }
-      if (cursor === null || clock.time < (buffer?.from ?? clock.time) || clock.time > cursor + 12 ||
-          (lastPlayhead !== null && Math.abs(clock.time - lastPlayhead) > 4)) {
-        reset(epoch, clock.time);
+      const clockAt = performance.now();
+      const elapsed = lastClock ? Math.max(0, clockAt - lastClock.at) / 1000 : 0;
+      const expected = lastClock ? lastClock.time + (lastClock.paused ? 0 : elapsed * lastClock.rate) : clock.time;
+      // A slow inference/download is not a seek. Compare against elapsed media
+      // time, not a fixed four-second advance, and keep contiguous work on underrun.
+      const continuous = !lastClock || (clock.paused === lastClock.paused && (clock.playbackRate || 1) === lastClock.rate);
+      if (cursor === null || clock.time < (buffer?.from ?? clock.time) || (continuous && Math.abs(clock.time - expected) > 4)) {
+        reset(epoch, clock.time, cursor !== null || lastClock !== null);
       }
-      lastPlayhead = clock.time;
+      lastClock = { time: clock.time, at: clockAt, paused: clock.paused, rate: clock.playbackRate || 1 };
       submitted = generation;
       if (alignWords && refinePending && buffer.cues.length) {
         refinePending = false;
@@ -165,14 +187,21 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
         buffer.applyAlignments(result.alignedWindows);
         publish(clock.time);
       }
-      if ((clock.paused && replaying) || buffer.until >= source.duration - 0.001 || cursor >= clock.time + AHEAD) {
+      const horizon = seekCheck && extendedSeekCheck ? CPU_AMBIGUOUS_LOOKAHEAD_SECONDS : AHEAD;
+      if ((clock.paused && replaying && startup.ready) || buffer.until >= source.duration - 0.001 || cursor >= clock.time + horizon) {
+        // Cached segments can cover minutes or hours, but each IPC payload only
+        // carries nearby cues. Refresh that slice even when no ASR is needed.
+        if (publishedPlayhead === null || Math.abs(clock.time - publishedPlayhead) >= AHEAD) publish(clock.time);
         debug(`buffer ready · ${Math.max(0, cursor - clock.time).toFixed(0)}s ahead`);
         timer = setTimeout(loop, 1000); return;
       }
       // Include the final partial second (and videos shorter than four seconds)
       // so the 12-second gate can also complete near the end of a video.
+      // More context resolves shared phrases after seeks and preserves short
+      // ayahs at boundaries. Keep the cheaper four-second window within an ayah.
+      const windowSeconds = !tracking?.locked || tracking.nearEnd ? 8 : 4;
       cursor = Math.min(cursor, Math.max(0, source.duration - 4));
-      if (!block || cursor < block.start || cursor + 4 > block.start + block.audio.length / SR) {
+      if (!block || cursor < block.start || Math.min(source.duration, cursor + windowSeconds) > block.start + block.audio.length / SR) {
         const data = await requestAudio(cursor);
         if (stopped || submitted !== generation) { timer = setTimeout(loop, 0); return; }
         if (data.sampleRate !== SR || (data.audio ? !(data.audio instanceof Float32Array) || data.audio.length > 24 * SR
@@ -183,7 +212,7 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
           Uint8Array.from(atob(data.pcm), (c) => c.charCodeAt(0)).buffer) };
       }
       const offset = Math.round((cursor - block.start) * SR);
-      const samples = Math.round(Math.min(4, source.duration - cursor) * SR);
+      const samples = Math.round(Math.min(windowSeconds, source.duration - cursor) * SR);
       const audio = block.audio.slice(offset, offset + samples);
       if (audio.length < samples - 1 || !audio.length) throw new Error('Audio ended before the requested window');
       const start = cursor;
@@ -192,6 +221,7 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
         timings: true, audioStart: start, alignWords });
       if (stopped) return;
       if (submitted === generation) {
+        tracking = result.tracking;
         replaying = false;
         buffer.add(start, audioDuration, result, clock.time);
         if (alignWords && buffer.cues.length) {
@@ -206,13 +236,15 @@ export function startLookahead({ url, media, startTime = 0, key, captureEpoch, h
           cursor = segment.cursor;
           block = null;
           worker.postMessage({ type: 'reset' });
+          tracking = null;
         }
         publish(clock.time);
         debug(`recognizing ahead · ${result.ms}ms · ${Math.max(0, cursor - clock.time).toFixed(0)}s buffered`);
       }
-      // Bound burst CPU duty to roughly one third, then sleep completely once
-      // prepared. Steady playback needs only one four-second inference/second.
-      timer = setTimeout(loop, Math.max(100, (result.ms || 0) * 2));
+      // Aim for one-third duty while buffered, but don't spend the remaining
+      // lead sleeping on a slower CPU. Include decoding/alignment time as well.
+      const spareMs = (buffer.until - clock.time - AHEAD / 2) * 1000 - (performance.now() - clockAt);
+      timer = setTimeout(loop, Math.max(100, Math.min((result.ms || 0) * 2, spareMs)));
     } catch (error) {
       if (stopped) return;
       if (submitted !== generation && error.name === 'AbortError') { timer = setTimeout(loop, 0); return; }

@@ -1,8 +1,11 @@
 // CPU look-ahead presentation gate. Processing may find a verse early, but do
 // not expose partial startup cues until the upcoming audio has been analyzed.
+export const CPU_LOOKAHEAD_SECONDS = 12;
+export const CPU_AMBIGUOUS_LOOKAHEAD_SECONDS = 28;
+
 export class StartupBuffer {
-  constructor(seconds = 12) { this.seconds = seconds; this.reset(); }
-  reset() { this.ready = false; }
+  constructor(seconds = CPU_LOOKAHEAD_SECONDS) { this.reset(seconds); }
+  reset(seconds = this.seconds) { this.seconds = seconds; this.ready = false; }
   update(playhead, duration, from, until) {
     const target = Math.min(duration, playhead + this.seconds);
     const covered = from !== null && until !== null && from <= playhead && until >= target - 0.001;

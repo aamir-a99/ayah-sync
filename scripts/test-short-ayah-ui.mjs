@@ -16,7 +16,12 @@ wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28);
 wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
 const server = createServer((req, res) => {
   if (req.url === '/audio.wav') {
-    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length }); res.end(wav);
+    const range = /bytes=(\d+)-(\d*)/.exec(req.headers.range || '');
+    const from = range ? Number(range[1]) : 0;
+    const until = range?.[2] ? Math.min(Number(range[2]), wav.length - 1) : wav.length - 1;
+    res.writeHead(range ? 206 : 200, { 'Content-Type': 'audio/wav', 'Accept-Ranges': 'bytes',
+      'Content-Length': until - from + 1, ...(range ? { 'Content-Range': `bytes ${from}-${until}/${wav.length}` } : {}) });
+    res.end(wav.subarray(from, until + 1));
   } else {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end('<!doctype html><title>Native CPU renderer test</title><video controls src="/audio.wav" style="width:640px;height:360px"></video>');
@@ -129,6 +134,23 @@ try {
       mode === 'onset-lead' ? 1.88 : 2);
     if (mode === 'onset-lead') assert.ok(seen.find((s) => s.where.includes('112:2')).at < 2,
       'the real renderer must switch at the supplied onset lead, not at the first word start/end');
+  }
+  await sw.evaluate(() => chrome.storage.local.set({ qltCPUHighlight: true }));
+  const partial = { ...fixture.cues[0], words: [
+    { word: 0, start: 0, end: 0.8 }, { word: 1, start: 0.9, end: 1.3 }, { word: 2, start: 1.4, end: 1.8 },
+  ], highlightWords: [{ word: 2, start: 1.45, end: 1.7 }] };
+  for (const [time, expected] of [[0.4, 0], [1.5, 2], [1.75, -1]]) {
+    await native.$eval('video', (v, time) => { v.pause(); v.currentTime = time; }, time);
+    await native.waitForFunction(() => !document.querySelector('video').seeking);
+    await sw.evaluate(async ({ id, cue, key }) => {
+      await chrome.tabs.sendMessage(id, { type: 'CARD_BUFFER', buffer: { key, duration: 8, from: 0, until: 8,
+        cueFrom: 0, cueUntil: 8, ready: true, segmentId: 1, captureEpoch: 1,
+        ranges: [{ id: 1, from: 0, until: 8 }], marks: [0], cues: [cue] } });
+    }, { id: tabId, cue: partial, key: native.url() });
+    await native.waitForFunction((expected) => {
+      const words = [...document.querySelector('#__qlt_card_host__').shadowRoot.querySelectorAll('#arabic .w')];
+      return words.findIndex((w) => w.classList.contains('cur')) === expected;
+    }, { timeout: 5000 }, expected);
   }
   console.log('Harness + native extension: short cues, pre-first-word onset switching and no invented upstream cues passed.');
 } finally {

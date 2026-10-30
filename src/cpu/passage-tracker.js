@@ -13,24 +13,30 @@ export class PassageTracker {
       this.anchor = null;
       this.current = null;
       this.locked = false;
+      this.context = null;
     }
     this.pending = null;
     this.confirmations = 0;
     this.misses = 0;
     this.history = [];
     this.timingMatches = [];
+    this.newPassage = false;
     this.lastWordStart = null;
   }
 
   state() {
     return { locked: this.locked, confirmations: this.confirmations,
       phase: this.locked ? 'tracking' : this.pending ? 'confirming' : 'identifying',
+      ambiguousRefs: this.pending?.ambiguous
+        ? [...new Set((this.pending.alternatives || []).filter((m) => m.score >= 0.6 && m.evidenceWords >= 3 &&
+          m.refEvidenceWords >= Math.min(2, m.refWordCount)).map((m) => m.ref))] : [],
       ref: this.current?.ref || null, nextRef: this.current?.next?.ref || null,
       nearEnd: !!this.current && this.current.word >= this.current.wordCount - 2 };
   }
 
   accept(candidate, observation, newPassage = false) {
     const wasLocked = this.locked && !newPassage;
+    this.newPassage ||= !wasLocked;
     if (newPassage) this.lastWordStart = null;
     const previousPos = this.current?.pos ?? -1;
     const { alternatives, supported, ...match } = candidate;
@@ -45,7 +51,7 @@ export class PassageTracker {
       }));
       for (const prior of this.history.slice(0, -1)) {
         const recovered = this.matcher.shortMatch(prior.text, refs) || this.matcher.match(prior.text, match.pos,
-          { localOnly: true, nearbyRefs: refs, evidenceOnly: true });
+          { localOnly: true, nearbyRefs: refs, evidenceOnly: true, allowEarlierEvidence: true });
         if (recovered && !recovered.ambiguous && recovered.score >= 0.6) {
           this.collectTimings(recovered, prior, -1, match.pos);
         }
@@ -60,6 +66,7 @@ export class PassageTracker {
     }
     this.anchor = candidate.pos;
     this.current = match;
+    this.context = match;
     this.locked = true;
     this.misses = 0;
     this.pending = null;
@@ -99,9 +106,13 @@ export class PassageTracker {
 
   update(text, observationWeight = 1, data = null) {
     this.timingMatches = [];
+    this.newPassage = false;
     const observation = { text, data };
     this.history.push(observation);
-    if (this.history.length > 12) this.history.shift();
+    // Keep the first phrase available while a shared-location ambiguity is
+    // resolved by later audio. Only compact token timings grow, not PCM/scores.
+    const historyLimit = !this.locked && this.pending?.ambiguous ? 28 : 12;
+    if (this.history.length > historyLimit) this.history.splice(0, this.history.length - historyLimit);
     // Rolling CTC windows often contain silence or an unfinished word at an
     // ayah boundary. That is no evidence of a different passage. In particular,
     // do not erase the basmala context while waiting for the next phrase.
@@ -119,6 +130,7 @@ export class PassageTracker {
     if (this.locked && !afterFatiha) {
       const candidate = this.matcher.match(text, this.anchor, {
         localOnly: true, nearbyRefs: this.matcher.nearbyRefs(this.anchor), evidenceOnly: true,
+        currentRef: this.current.ref, nextRef: this.current.next?.ref,
       });
       if (candidate && candidate.score >= 0.35 && candidate.evidenceWords >= 2) {
         // The overlapping window can still contain the previous verse. Never
@@ -136,11 +148,22 @@ export class PassageTracker {
       // Half-second hops are highly correlated, not independent failures.
       // Short partial phrases must not force global re-identification either.
       if (words.length < 3 || (this.misses += observationWeight) < 6) return null;
+      // A noisy window doesn't erase which surah we were following. An explicit
+      // worker reset/seek still clears this hint via reset() above.
+      const context = this.context;
       this.reset();
+      this.context = context;
     }
-    let candidate = this.matcher.match(text, null, { evidenceOnly: true });
-    if (afterFatiha && candidate?.surah === 1 && candidate.ayah !== 1) {
+    // Al-Fatiha can be followed by any passage; its basmala alone must remain
+    // ambiguous rather than biasing every prayer transition back to Al-Fatiha.
+    const context = afterFatiha ? null : this.context;
+    let candidate = this.matcher.match(text, null, { evidenceOnly: true,
+      currentRef: context?.ref, nextRef: context?.next?.ref });
+    const restartingFatiha = candidate?.ref === '1:2' &&
+      (this.pending?.alternatives || (this.pending ? [this.pending] : [])).some((c) => c.ref === '1:1');
+    if (afterFatiha && candidate?.surah === 1 && candidate.ayah !== 1 && !restartingFatiha) {
       // Old Al-Fatiha audio in the rolling window cannot start a new passage.
+      // A newly heard basmala followed by al-hamd can confirm a real restart.
       const local = this.matcher.match(text, this.anchor, {
         localOnly: true, nearbyRefs: new Set(['1:7']), evidenceOnly: true,
       });

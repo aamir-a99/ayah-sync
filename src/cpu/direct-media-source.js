@@ -1,4 +1,4 @@
-import { Input, CustomSource, MP4, MATROSKA, MP3, WAVE, OGG, ADTS, FLAC,
+import { Input, CustomSource, MP4, MATROSKA, WEBM, MP3, WAVE, OGG, ADTS, FLAC,
   EncodedPacketSink, EncodedAudioPacketSource, Output, MkvOutputFormat, StreamTarget } from 'mediabunny';
 import { BatchedAudioSource, MAX_VIDEO_SECONDS } from './audio-batches.js';
 import { createAudioBatchStore } from './audio-batch-store.js';
@@ -65,7 +65,7 @@ async function downloadDirectRange({ url, expectedDuration, credentials, identit
   onProgress({ stage: 'session' });
   const reader = createMediaRangeReader({ url, signal, credentials, identity });
   const version = await reader.probe(); setIdentity(version);
-  const input = new Input({ formats: [MP4, MATROSKA, MP3, WAVE, OGG, ADTS, FLAC],
+  const input = new Input({ formats: [MP4, MATROSKA, WEBM, MP3, WAVE, OGG, ADTS, FLAC],
     source: new CustomSource({ getSize: () => reader.getSize(), read: (from, until) => reader.read(from, until),
       maxCacheSize: 2 * 1024 * 1024, prefetchProfile: 'fileSystem', handleUnhandledError() {} }) });
   let output = null;
@@ -102,7 +102,9 @@ async function downloadDirectRange({ url, expectedDuration, credentials, identit
     onProgress({ stage: 'download', received: 0, total: end - start });
     for await (const packet of sink.packets(firstPacket)) {
       signal.throwIfAborted();
-      if (!Number.isFinite(packet.timestamp) || !Number.isFinite(packet.duration) || packet.duration <= 0 ||
+      // Matroska/WebM may omit packet duration (the parser reports zero).
+      // Keep those packets; timestamps and the decoded batch still bound coverage.
+      if (!Number.isFinite(packet.timestamp) || !Number.isFinite(packet.duration) || packet.duration < 0 ||
           packet.byteLength > 4 * 1024 * 1024) throw new Error('Invalid audio packet');
       if (packet.timestamp >= to) break;
       first ??= packet.timestamp;

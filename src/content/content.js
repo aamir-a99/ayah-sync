@@ -1,4 +1,6 @@
-import { displayWordIndex } from '../cpu/display-word.js';
+import { displayWordIndices } from '../cpu/display-word.js';
+import { displayTiming } from '../cpu/display-timing.js';
+import { CPU_LOOKAHEAD_SECONDS } from '../cpu/startup-buffer.js';
 const DEV_MODE = import.meta.env.DEV;
 
 /**
@@ -777,9 +779,11 @@ function renderAyah(a, next) {
 /** cur = index of the word being recited (-1: none yet, Infinity: all done). */
 function paintWords(cur) {
   if (browserCPU && !cpuHighlight && !tl) cur = Infinity;
+  const indices = Array.isArray(cur) ? cur : null;
+  const first = indices ? indices[0] : cur;
   for (let i = 0; i < wordEls.length; i++) {
     const el = wordEls[i];
-    const state = i === cur ? 2 : browserCPU && !tl ? 1 : i < cur ? 1 : 0;
+    const state = (indices ? indices.includes(i) : i === cur) ? 2 : browserCPU && !tl ? 1 : i < first ? 1 : 0;
     if (el._s === state) continue;
     el._s = state;
     el.classList.toggle('done', state === 1);
@@ -1011,9 +1015,10 @@ function paintCpuHighlight(highlight) {
   }
   // No rate extrapolation: show only the last acoustically supported word.
   // Expiry includes inference/transport latency and clears silence/stale work.
-  shownWord = displayWordIndex(liveMatch.arabic, builtText, highlight.word);
-  if (shownWord < 0) return paintWords(Infinity);
-  paintWords(shownWord);
+  const indices = displayWordIndices(liveMatch.arabic, builtText, highlight.word);
+  shownWord = indices[0] ?? -1;
+  if (!indices.length) return paintWords(Infinity);
+  paintWords(indices);
   highlightTimer = setTimeout(() => paintWords(Infinity), Math.min(remaining, 1000));
 }
 
@@ -1102,13 +1107,13 @@ function bufferTick() {
   const changed = shown?.ref !== cue.match.ref;
   liveMatch = cue.match;
   renderAyah(cue.match, cue.match.next);
-  const timing = cue.highlightWords?.length ? cue.highlightWords : cue.words;
+  const timing = displayTiming(cue);
   const span = cpuHighlight ? timing.findLast((w) => w.start <= t && t < w.end) : null;
   const word = span?.word ?? -1;
   if (changed || word !== bufferedWord) {
     bufferedWord = word;
-    const display = word < 0 ? -1 : displayWordIndex(cue.match.arabic, builtText, word);
-    paintWords(display < 0 ? Infinity : display);
+    const display = displayWordIndices(cue.match.arabic, builtText, word);
+    paintWords(display.length ? display : Infinity);
   }
   if (bufferedRef !== cue.match.ref) {
     bufferedRef = cue.match.ref;
@@ -1140,9 +1145,11 @@ function armMediaWatch() {
     const following = !!liveMatch;
     if (cpuBuffer && videoKey(location.href) === cpuBuffer.key) {
       const time = event.target.currentTime;
-      const cached = [...cpuSegments.values()].find((s) => s.ready && time >= (s.cueFrom ?? s.from) && time <= (s.cueUntil ?? s.until));
+      const requiredSeconds = Math.min(CPU_LOOKAHEAD_SECONDS, Math.max(0, cpuBuffer.duration - time));
+      const cached = [...cpuSegments.values()].find((s) => s.ready && time >= (s.cueFrom ?? s.from) && time <= (s.cueUntil ?? s.until) &&
+        s.until >= time + requiredSeconds - 0.001);
       cpuBuffer = cached ? { ...cached, ranges: cpuBuffer.ranges, marks: cpuBuffer.marks }
-        : { ...cpuBuffer, from: null, until: null, cues: [], ready: false, preparedSeconds: 0 };
+        : { ...cpuBuffer, from: null, until: null, cues: [], ready: false, preparedSeconds: 0, requiredSeconds };
     }
     bufferedRef = null;
     caf(bufferRaf);

@@ -15,7 +15,7 @@ export function speechEnvelope(audio, sampleRate = 16000) {
   return { energy, step: hop / sampleRate, threshold: Math.max(0.003, peak * 0.01) };
 }
 
-const acousticText = (word) => word.replace(/[ؐ-ًؚ-ٰٟۖ-ۭـ]/g, '')
+const acousticText = (word) => word.replace(/ۦ(?=[ء-ي])/g, 'ي').replace(/[ؐ-ًؚ-ٰٟۖ-ۭـ]/g, '')
   .replace(/[آأإٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
   .replace(/ؤ/g, 'و').replace(/ئ/g, 'ي').replace(/[^ء-ي]/g, '');
 

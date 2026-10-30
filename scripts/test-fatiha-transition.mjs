@@ -38,6 +38,14 @@ basmala.update(ar['112:1']);
 assert.equal(basmala.update(ar['112:1'])?.ref, '112:1');
 assert.equal(basmala.update(ar['112:2'])?.ref, '112:2', 'normal local tracking resumes after the jump');
 
+const repeated = finishFatiha();
+assert.equal(repeated.update(ar['1:1']), null);
+assert.equal(repeated.current.ref, '1:7', 'basmala alone must not restart the passage');
+assert.equal(repeated.update(ar['1:2'])?.ref, '1:2', 'basmala followed by al-hamd confirms a repeated Al-Fatiha');
+assert.equal(repeated.newPassage, true, 'timed buffers must receive the confirmed passage boundary');
+assert.equal(repeated.update(ar['1:3'])?.ref, '1:3');
+assert.equal(repeated.newPassage, false, 'ordinary overlapping windows must not duplicate passage boundaries');
+
 const noise = finishFatiha();
 noise.update(ar['112:1']);
 assert.equal(noise.update(ar['67:1']), null, 'unrelated observations do not confirm a jump');

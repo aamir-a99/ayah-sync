@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { decodeCtc, wordHighlight } from '../src/cpu/ctc-words.js';
-import { displayWordIndex } from '../src/cpu/display-word.js';
+import { displayWordIndex, displayWordIndices } from '../src/cpu/display-word.js';
 
 const tokens = ['<blk>', 'ا', 'ب', 'ل', 'ه', '▁'];
 function logits(path) {
@@ -44,12 +44,19 @@ assert.equal(wordHighlight([], match, 4).word, -1);
 assert.equal(wordHighlight(words, null, 4), null);
 assert.equal(displayWordIndex('الحمد لله رب العالمين', 'الحمد لله ۞ رب العالمين', 2), 3,
   'standalone display pause signs must not shift the highlighted word');
+const uthmani = JSON.parse(readFileSync(new URL('../src/data/quran-uthmani.json', import.meta.url)));
+const indopak = JSON.parse(readFileSync(new URL('../src/data/quran-indopak.json', import.meta.url)));
+assert.deepEqual(displayWordIndices(uthmani['2:5'], indopak['2:5'], 0), [0], 'dotless hamza seats must map across scripts');
+assert.deepEqual(displayWordIndices(uthmani['2:25'], indopak['2:25'], 3), [3, 4], 'one spoken word may span two IndoPak words');
+assert.equal(displayWordIndex(uthmani['2:10'], indopak['2:10'], 9), displayWordIndex(uthmani['2:10'], indopak['2:10'], 10),
+  'two spoken words may share one unspaced IndoPak display span');
+assert.equal(displayWordIndices(uthmani['2:54'], indopak['2:54'], 15).length, 2, 'split dhal/lam spelling must highlight both display spans');
 
 // Exercise the actual CPU painting function without starting a browser/model.
 const source = readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
 const paints = [], timers = new Map();
 let now = 1000, id = 0;
-const context = vm.createContext({ displayWordIndex, Date: { now: () => now }, Math,
+const context = vm.createContext({ displayWordIndices, Date: { now: () => now }, Math,
   cpuHighlight: true, highlightTimer: null, shownWord: -1,
   liveMatch: match, builtText: match.arabic,
   paintWords(word) { paints.push(word); },
@@ -58,7 +65,7 @@ const context = vm.createContext({ displayWordIndex, Date: { now: () => now }, M
 });
 vm.runInContext(source.slice(source.indexOf('function paintCpuHighlight('), source.indexOf('function liveTick(')), context);
 vm.runInContext(`paintCpuHighlight({ref:'1:2', word:2, expiresAt:1600})`, context);
-assert.equal(paints.at(-1), 2);
+assert.deepEqual(paints.at(-1), [2]);
 assert.equal([...timers.values()][0].ms, 600);
 now = 1600;
 [...timers.values()][0].fn();
@@ -73,6 +80,8 @@ const paintStart = source.indexOf('function paintWords(');
 vm.runInContext(source.slice(paintStart, source.indexOf('\n//', paintStart)), painting);
 vm.runInContext('paintWords(1)', painting);
 assert.deepEqual(wordEls.map((w) => w._s), [1, 2, 1], 'CPU words before and after the highlight stay fully readable');
+vm.runInContext('paintWords([0, 1])', painting);
+assert.deepEqual(wordEls.map((w) => w._s), [2, 2, 1], 'all display fragments of one spoken word must light together');
 vm.runInContext('browserCPU = false; paintWords(1)', painting);
 assert.deepEqual(wordEls.map((w) => w._s), [1, 2, 0], 'GPU live styling remains unchanged');
 vm.runInContext('browserCPU = true; tl = {}; paintWords(1)', painting);

@@ -1,4 +1,4 @@
-import { Input, BlobSource, MP4, MATROSKA, MP3, WAVE, OGG, ADTS, FLAC, AudioBufferSink } from 'mediabunny';
+import { Input, BlobSource, MP4, MATROSKA, WEBM, MP3, WAVE, OGG, ADTS, FLAC, AudioBufferSink } from 'mediabunny';
 import { YOUTUBE_LIMITS } from './youtube-policy.js';
 
 // Demux partial containers with a maintained library. Decode only the requested
@@ -6,7 +6,7 @@ import { YOUTUBE_LIMITS } from './youtube-policy.js';
 export async function openAudioBatch(blob, metadata, signal) {
   signal.throwIfAborted();
   const input = new Input({ source: new BlobSource(blob, { maxCacheSize: 2 * 1024 * 1024 }),
-    formats: [MP4, MATROSKA, MP3, WAVE, OGG, ADTS, FLAC] });
+    formats: [MP4, MATROSKA, WEBM, MP3, WAVE, OGG, ADTS, FLAC] });
   const abort = () => input.dispose();
   signal.addEventListener('abort', abort, { once: true });
   try {

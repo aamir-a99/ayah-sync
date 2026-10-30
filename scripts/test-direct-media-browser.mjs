@@ -16,8 +16,9 @@ try {
   for (const [name, args, mime] of [
     ['long.mp3', ['-f', 'lavfi', '-i', 'sine=frequency=220:duration=2000:sample_rate=16000', '-c:a', 'libmp3lame', '-b:a', '24k'], 'audio/mpeg'],
     ['long.mp4', ['-f', 'lavfi', '-i', 'color=black:s=16x16:r=1:d=2000', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=2000:sample_rate=16000',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '1', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '24k', '-shortest', '-movflags', '+faststart'], 'video/mp4'],
+      '-c:v', 'mpeg4', '-g', '1', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '24k', '-shortest', '-movflags', '+faststart'], 'video/mp4'],
     ['short.wav', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=12:sample_rate=8000', '-ac', '2', '-c:a', 'pcm_s16le'], 'audio/wav'],
+    ['short.webm', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=12:sample_rate=48000', '-c:a', 'libopus'], 'audio/webm'],
   ]) {
     const path = join(temp, name);
     execFileSync('ffmpeg', ['-nostdin', '-v', 'error', ...args, path]);
@@ -57,7 +58,7 @@ try {
   const sw = await target.worker(), extension = `chrome-extension://${new URL(target.url()).host}`;
   const observer = await browser.newPage();
   await observer.goto(`${extension}/src/popup/popup.html`);
-  for (const name of ['long.mp3', 'long.mp4', 'short.wav']) {
+  for (const name of ['long.mp3', 'long.mp4', 'short.wav', 'short.webm']) {
     const fixture = files.get('/' + name), initialRequests = requests.length;
     const result = await observer.evaluate(async ({ asset, url, duration }) => {
       const { prepareDirectMedia } = await import(chrome.runtime.getURL(`assets/${asset}`));

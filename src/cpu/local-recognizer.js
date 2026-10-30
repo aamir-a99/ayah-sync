@@ -95,6 +95,7 @@ export async function createRecognizer(baseURL, progress = () => {}, maxThreads 
       }
       return { match, text, highlight, ms: Math.round(performance.now() - start), tracking: passage.state(),
         ...(timings ? { timedWords: words, timingMatch: passage.locked ? passage.current : null,
+          newPassage: passage.newPassage,
           timingMatches: passageTimings(passage.timingMatches),
           timingMs: performance.now() - timingStart } : {}) };
     },

@@ -93,7 +93,9 @@ export class LookaheadBuffer {
   }
   add(start, duration, result, playhead) {
     this.from ??= start;
-    this.until = start + duration;
+    // Adaptive windows overlap: a shorter subsequent request must not shrink
+    // the coverage already recognized by the preceding, longer window.
+    this.until = Math.max(this.until ?? start, start + duration);
     this.history.push({ start, words: result.timedWords || [] });
     this.history = this.history.filter((w) => w.start >= start - 8);
     if (Array.isArray(result.timingMatches)) {
@@ -107,7 +109,7 @@ export class LookaheadBuffer {
         groups.set(match.ref, group);
       }
       for (const { match, spans } of [...groups.values()].sort((a, b) => a.match.pos - b.match.pos)) {
-        this.addMatch(match, spans);
+        this.addMatch(match, spans, result.newPassage === true);
       }
     } else if (result.timingMatch) {
       const match = result.timingMatch;
@@ -116,7 +118,7 @@ export class LookaheadBuffer {
           start: w.start + window.start, end: w.end + window.start }));
         return pairs.length >= Math.min(2, match.wordCount) ? pairs : [];
       });
-      this.addMatch(match, candidates);
+      this.addMatch(match, candidates, result.newPassage === true);
     }
     // CPU look-ahead retains compact verse/word timings for session replay;
     // raw transcript history and PCM remain bounded independently.
@@ -130,9 +132,11 @@ export class LookaheadBuffer {
       }
     }
   }
-  addMatch(match, spans) {
+  addMatch(match, spans, newPassage = false) {
     let cue = this.cues.at(-1);
-    if (cue && match.pos < cue.match.pos && match.ref !== cue.match.ref) return;
+    // Reject stale overlapping audio, but permit a separately confirmed passage
+    // to restart an earlier surah/ayah (including repeated Al-Fatiha in prayer).
+    if (cue && match.pos < cue.match.pos && match.ref !== cue.match.ref && !newPassage) return;
     const continuing = cue?.match.ref === match.ref;
     // Greedy CTC may sustain the last character until the window's end. Its
     // end is not an admission boundary for the next ayah. Ordered, supported
